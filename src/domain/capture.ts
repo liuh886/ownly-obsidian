@@ -1,0 +1,647 @@
+/**
+ * Ownly Capture — independent domain for place collection.
+ *
+ * Capture never owns Trip planning state.
+ * Planner never owns Capture collection state.
+ * Their only shared contract is the portable Capture Collection schema.
+ */
+
+import { type HotelPropertyFacts } from './planner';
+
+// ─── Source provider ──────────────────────────────────────────────────────────
+
+export type CaptureSourceProvider =
+  | 'google_maps'
+  | 'google_travel'
+  | 'booking'
+  | 'agoda'
+  | 'tabelog'
+  | 'xiaohongshu'
+  | 'other';
+
+// ─── Collection ───────────────────────────────────────────────────────────────
+
+export interface CaptureCollection {
+  id: string;
+  title: string;
+  source_provider?: CaptureSourceProvider;
+  source_list_id?: string;
+  source_url?: string;
+  currency?: string;
+  created_at: string;
+  updated_at?: string;
+}
+
+// ─── Place ────────────────────────────────────────────────────────────────────
+
+export type CapturePlaceKind =
+  | 'attraction'
+  | 'food'
+  | 'cafe'
+  | 'stay'
+  | 'shopping'
+  | 'transit'
+  | 'experience'
+  | 'service'
+  | 'other';
+
+export type CapturePlacePriority = 'must' | 'want' | 'optional';
+
+export interface CapturePlace {
+  id: string;
+  collection_id: string;
+  title: string;
+
+  source: {
+    provider: CaptureSourceProvider;
+    url: string;
+    place_id?: string;
+    category?: string;
+    types?: string[];
+  };
+
+  address?: string;
+  coordinates?: { lat: number; lng: number };
+
+  rating?: number;
+  review_count?: number;
+
+  price?: {
+    raw?: string;
+    currency?: string;
+    min?: number;
+    max?: number;
+    unit?: string;
+    level?: number;
+  };
+
+  open_hours?: string;
+  phone?: string;
+  plus_code?: string;
+  menu_url?: string;
+  reservation_url?: string;
+  review_topics?: string[];
+  /** Service/amenity chips from the detail pane; stored for later AI passes, not shown in v1 UI. */
+  service_options?: string[];
+  hotel_facts?: HotelPropertyFacts;
+
+  inferred_kind?: CapturePlaceKind;
+
+  user?: {
+    priority?: CapturePlacePriority;
+    tags?: string[];
+    why?: string;
+    notes?: string;
+    preferred_window?: string;
+    duration_minutes?: number;
+  };
+
+  /**
+   * Capture-display fields the user hand-confirmed (form submit, inline
+   * editor, manual map bind). Re-scrapes — DOM or fallback — never touch
+   * these. Keys use CapturePlace-level names: title|kind|category|rating|
+   * review_count|price|address|phone|plus_code|open_hours|place_id.
+   */
+  user_overrides?: string[];
+
+  captured_at: string;
+  updated_at?: string;
+  /** Consecutive background-enrich failures; resume skips places at MAX. Reset on success. */
+  enrich_failures?: number;
+  /** Last failure timestamp; a newer user edit re-arms exactly one retry. */
+  enrich_last_failed_at?: string;
+  /** Last attempt timestamp (any outcome); resume backs off within the retry interval. */
+  enrich_last_attempt_at?: string;
+}
+
+// ─── Extension State V3 ──────────────────────────────────────────────────────
+
+export interface OwnlyCaptureStateV3 {
+  version: 3;
+  active_collection_id?: string;
+  collections: CaptureCollection[];
+  places: CapturePlace[];
+  /** Optional. Only used when Web Planner is open. Never required for Capture itself. */
+  planner_target?: {
+    trip_id: string;
+    title: string;
+    collection_id?: string;
+  };
+  last_export_at?: string;
+}
+
+export const EMPTY_CAPTURE_STATE_V3: OwnlyCaptureStateV3 = {
+  version: 3,
+  collections: [],
+  places: [],
+};
+
+export const DEFAULT_INBOX_TITLE = 'Inbox';
+
+export function ensureInboxCollection(state: OwnlyCaptureStateV3): OwnlyCaptureStateV3 {
+  const hasInbox = state.collections.some((c) => c.title === DEFAULT_INBOX_TITLE || c.id.startsWith('inbox-'));
+  if (hasInbox) return state;
+  const now = new Date().toISOString();
+  const inbox: CaptureCollection = { id: `inbox-${Date.now()}`, title: DEFAULT_INBOX_TITLE, created_at: now };
+  // Keep existing active_collection_id if already set (e.g., migrated trip), just ensure inbox exists
+  return { ...state, collections: [...state.collections, inbox], active_collection_id: state.active_collection_id ?? inbox.id };
+}
+
+export function getInboxCollection(state: OwnlyCaptureStateV3): CaptureCollection | null {
+  return state.collections.find((c) => c.title === DEFAULT_INBOX_TITLE || c.id.startsWith('inbox-')) ?? null;
+}
+
+// ─── Collection Export (portable JSON) ───────────────────────────────────────
+// 权限边界（P0）：Collection 是「地点集合」，Trip 是「个人执行计划」
+// 分享 Collection 时：
+//   允许：地点（title/address/coordinates/source）、标签（tags）、描述（why）、图片（未落库，预留）
+//   禁止：费用（price.*）、私人备注（user.notes）、行程日期（仅 Trip 拥有，Collection 不含）
+// 实现：buildCollectionExport 默认完整导出（含私有字段，用于个人备份）；
+//       buildShareableCollectionExport / sanitizePlaceForShare 用于对外分享（自动剥离禁止字段）
+//       协议文档：docs/architecture/ARCHITECTURE.md#Capture Boundary Constraint
+
+export interface OwnlyCollectionExportV1 {
+  schema: 'ownly.capture.collection';
+  version: 1;
+  exported_at: string;
+  collection: {
+    id: string;
+    title: string;
+    source_provider?: string;
+    source_list_id?: string;
+    source_url?: string;
+    currency?: string;
+    place_count: number;
+  };
+  places: CapturePlace[];
+  /** P1: 来源追踪（可选，分享导入时填充） */
+  provenance?: {
+    source_type: 'shared_collection';
+    creator?: string;
+    collection_id: string;
+    shared_at?: string;
+  };
+}
+
+// ─── Export builder ──────────────────────────────────────────────────────────
+
+export function buildCollectionExport(
+  collection: CaptureCollection,
+  places: CapturePlace[],
+): OwnlyCollectionExportV1 {
+  return {
+    schema: 'ownly.capture.collection',
+    version: 1,
+    exported_at: new Date().toISOString(),
+    collection: {
+      id: collection.id,
+      title: collection.title,
+      source_provider: collection.source_provider,
+      source_list_id: collection.source_list_id,
+      source_url: collection.source_url,
+      currency: collection.currency,
+      place_count: places.length,
+    },
+    places,
+  };
+}
+
+/** P0: 分享用净化 — 剥离费用/私人备注等禁止字段 */
+export function sanitizePlaceForShare(place: CapturePlace): CapturePlace {
+  const rest = { ...place };
+  delete rest.price;
+  const user = place.user ? { ...place.user } : undefined;
+  if (user) {
+    delete user.notes; // 私人备注禁止外泄
+    // why/tags 视为描述/标签，允许分享；如需更严格可一并删除 user.why
+  }
+  return {
+    ...rest,
+    price: undefined,
+    user: user && Object.keys(user).length > 0 ? user : undefined,
+  };
+}
+
+export function buildShareableCollectionExport(
+  collection: CaptureCollection,
+  places: CapturePlace[],
+  provenance?: OwnlyCollectionExportV1['provenance'],
+): OwnlyCollectionExportV1 {
+  return {
+    schema: 'ownly.capture.collection',
+    version: 1,
+    exported_at: new Date().toISOString(),
+    collection: {
+      id: collection.id,
+      title: collection.title,
+      source_provider: collection.source_provider,
+      source_list_id: collection.source_list_id,
+      source_url: collection.source_url,
+      currency: collection.currency,
+      place_count: places.length,
+    },
+    places: places.map(sanitizePlaceForShare),
+    provenance,
+  };
+}
+
+export function isCollectionExport(obj: unknown): obj is OwnlyCollectionExportV1 {
+  if (!obj || typeof obj !== 'object') return false;
+  const o = obj as Record<string, unknown>;
+  return o.schema === 'ownly.capture.collection' && o.version === 1;
+}
+
+// ─── V2 → V3 Migration ──────────────────────────────────────────────────────
+
+// ─── Capture → Planner Adapter ───────────────────────────────────────────────
+
+export interface PlannerTripPlaceLike {
+  schema_version: '0.1';
+  type: 'trip_place';
+  id: string;
+  trip_id: string;
+  title: string;
+  source_provider: string;
+  source_url: string;
+  source_place_id?: string;
+  kind: string;
+  priority?: string;
+  tags: string[];
+  why?: string;
+  notes?: string;
+  source_category?: string;
+  observed_rating?: number;
+  observed_review_count?: number;
+  observed_price?: string;
+  price_currency?: string;
+  price_min?: number;
+  price_max?: number;
+  price_unit?: string;
+  price_level?: number;
+  open_hours?: string;
+  address?: string;
+  coordinates?: { lat: number; lng: number };
+  phone?: string;
+  plus_code?: string;
+  menu_url?: string;
+  reservation_url?: string;
+  review_topics?: string[];
+  service_options?: string[];
+  types?: string[];
+  hotel_facts?: HotelPropertyFacts;
+  preferred_window?: string;
+  duration_minutes?: number;
+  signals: string[];
+  risks: string[];
+  reservation_status: 'none';
+  state: 'candidate';
+  import_provenance?: {
+    source_type: 'shared_collection';
+    creator?: string;
+    collection_id: string;
+    shared_at?: string;
+    imported_at: string;
+  };
+  created_at: string;
+}
+
+/**
+ * Convert a CapturePlace into a Planner-compatible place.
+ * Generates a new ID to avoid collision when importing the same Collection into multiple Trips.
+ */
+export function capturePlaceToPlannerPlace(
+  capture: CapturePlace,
+  tripId: string,
+  provenance?: OwnlyCollectionExportV1['provenance'],
+  options?: { preserveId?: boolean },
+): PlannerTripPlaceLike {
+  const now = new Date().toISOString();
+  const id = options?.preserveId && capture.id
+    ? capture.id
+    : (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `plc-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
+  return {
+    schema_version: '0.1',
+    type: 'trip_place',
+    id,
+    trip_id: tripId,
+    title: capture.title,
+    source_provider: capture.source.provider,
+    source_url: capture.source.url,
+    source_place_id: capture.source.place_id,
+    kind: capture.inferred_kind || 'other',
+    priority: capture.user?.priority,
+    tags: capture.user?.tags || [],
+    why: capture.user?.why,
+    notes: capture.user?.notes,
+    source_category: capture.source.category,
+    observed_rating: capture.rating,
+    observed_review_count: capture.review_count,
+    observed_price: capture.price?.raw,
+    price_currency: capture.price?.currency,
+    price_min: capture.price?.min,
+    price_max: capture.price?.max,
+    price_unit: capture.price?.unit as PlannerTripPlaceLike['price_unit'],
+    price_level: capture.price?.level,
+    open_hours: capture.open_hours,
+    address: capture.address,
+    coordinates: capture.coordinates,
+    phone: capture.phone,
+    plus_code: capture.plus_code,
+    menu_url: capture.menu_url,
+    reservation_url: capture.reservation_url,
+    review_topics: capture.review_topics,
+    service_options: capture.service_options,
+    types: capture.source.types,
+    hotel_facts: capture.hotel_facts,
+    preferred_window: capture.user?.preferred_window,
+    duration_minutes: capture.user?.duration_minutes,
+    signals: (() => {
+      const sigs: string[] = [];
+      if (capture.hotel_facts?.opened_year) {
+        const y = parseInt(capture.hotel_facts.opened_year, 10);
+        const nowYear = new Date().getFullYear();
+        if (Number.isFinite(y) && nowYear - y <= 3 && nowYear >= y) {
+          sigs.push(`🆕 ${capture.hotel_facts.opened_year}年开业 (新开业)`);
+        } else {
+          sigs.push(`📅 ${capture.hotel_facts.opened_year}年开业`);
+        }
+      }
+      if (capture.hotel_facts?.renovated_year) {
+        const ry = parseInt(capture.hotel_facts.renovated_year, 10);
+        const nowYear = new Date().getFullYear();
+        if (Number.isFinite(ry) && nowYear - ry <= 3 && nowYear >= ry) {
+          sigs.push(`✨ ${capture.hotel_facts.renovated_year}年新装修`);
+        } else {
+          sigs.push(`🔨 ${capture.hotel_facts.renovated_year}年装修`);
+        }
+      }
+      return sigs;
+    })(),
+    risks: [],
+    reservation_status: 'none',
+    state: 'candidate',
+    import_provenance: provenance
+      ? {
+          source_type: 'shared_collection',
+          creator: provenance.creator,
+          collection_id: provenance.collection_id,
+          shared_at: provenance.shared_at,
+          imported_at: now,
+        }
+      : undefined,
+    created_at: now,
+  };
+}
+
+// ─── Export parse ────────────────────────────────────────────────────────────
+
+export function parseCaptureCollectionExport(data: unknown): OwnlyCollectionExportV1 | null {
+  if (!isCollectionExport(data)) return null;
+  const d = data as OwnlyCollectionExportV1;
+  if (!d.places || !Array.isArray(d.places)) return null;
+  if (!d.collection || typeof d.collection !== 'object') return null;
+  return d;
+}
+
+// ─── V3 Place lookup helpers ─────────────────────────────────────────────────
+
+import { PlaceIdentityService, getStrongPlaceIdentityKeys, shareStrongPlaceIdentity } from './place-identity';
+
+/** Find an existing place by URL, Place ID, or coordinates. */
+export function findExistingPlace(
+  places: CapturePlace[],
+  sourceUrl: string,
+  sourcePlaceId?: string,
+  coordinates?: { lat: number; lng: number },
+): CapturePlace | undefined {
+  return places.find(
+    (p) =>
+      p.source.url === sourceUrl ||
+      (sourcePlaceId && p.source.place_id === sourcePlaceId) ||
+      (coordinates && p.coordinates &&
+        p.coordinates.lat === coordinates.lat &&
+        p.coordinates.lng === coordinates.lng),
+  );
+}
+
+/** PlaceIdentityLike adapter for CapturePlace. */
+function captureToIdentityLike(place: CapturePlace): { source_provider?: string; source_place_id?: string; source_url?: string; title?: string; coordinates?: { lat: number; lng: number } | null } {
+  return {
+    source_provider: place.source.provider,
+    source_place_id: place.source.place_id,
+    source_url: place.source.url,
+    title: place.title,
+    coordinates: place.coordinates ?? null,
+  };
+}
+
+function candidateToIdentityLike(candidate: { source_provider?: string; source_place_id?: string; source_url?: string; title?: string; coordinates?: { lat: number; lng: number } | null }): { source_provider?: string; source_place_id?: string; source_url?: string; title?: string; coordinates?: { lat: number; lng: number } | null } {
+  return {
+    source_provider: candidate.source_provider,
+    source_place_id: candidate.source_place_id,
+    source_url: candidate.source_url,
+    title: candidate.title ?? undefined,
+    coordinates: candidate.coordinates ?? undefined,
+  };
+}
+
+/**
+ * Find an existing place using strong identity authority (Google Place ID, CID, etc).
+ * Falls back to URL/place_id/coordinates match if no strong identity is found.
+ * Returns the matching place, or undefined if no duplicate exists.
+ */
+export function findExistingPlaceByIdentity(
+  places: CapturePlace[],
+  candidate: { source_provider?: string; source_place_id?: string; source_url?: string; title?: string; coordinates?: { lat: number; lng: number } | null },
+): CapturePlace | undefined {
+  const probeKeys = new Set(getStrongPlaceIdentityKeys(candidateToIdentityLike(candidate)));
+  if (probeKeys.size > 0) {
+    const match = places.find((p) => {
+      const placeKeys = getStrongPlaceIdentityKeys(captureToIdentityLike(p));
+      return placeKeys.some((key) => probeKeys.has(key));
+    });
+    if (match) return match;
+  }
+  return undefined;
+}
+
+/**
+ * Find potential duplicate places based on strong identity, canonical URL, or weak evidence (e.g. title similarity).
+ *
+ * NOTE: This function is for UI duplicate suggestions / warning prompts ONLY
+ * and MUST NOT be used for automatic merge without explicit user confirmation.
+ */
+export function findPotentialDuplicatePlaces(
+  places: CapturePlace[],
+  candidate: { source_provider?: string; source_place_id?: string; source_url?: string; title?: string; coordinates?: { lat: number; lng: number } | null },
+): CapturePlace[] {
+  const matches: CapturePlace[] = [];
+  const strong = findExistingPlaceByIdentity(places, candidate);
+  if (strong) {
+    matches.push(strong);
+  }
+
+  const candLike = candidateToIdentityLike(candidate);
+  const normUrl = PlaceIdentityService.normalizeUrl(candLike.source_url);
+  if (normUrl && !normUrl.includes('/search')) {
+    for (const p of places) {
+      if (matches.includes(p)) continue;
+      const pNormUrl = PlaceIdentityService.normalizeUrl(p.source.url);
+      if (pNormUrl === normUrl) {
+        matches.push(p);
+      }
+    }
+  }
+
+  if (candidate.title && candidate.title.trim().length >= 2) {
+    const normTitle = candidate.title.trim().toLowerCase();
+    for (const p of places) {
+      if (matches.includes(p)) continue;
+      if (p.title.trim().toLowerCase() === normTitle) {
+        matches.push(p);
+      }
+    }
+  }
+
+  return matches;
+}
+
+/**
+ * Check if two places share strong identity (same Google Place ID, CID, etc).
+ * Used for dedup decisions during import.
+ */
+export function placesShareStrongIdentity(a: CapturePlace, b: CapturePlace): boolean {
+  return shareStrongPlaceIdentity(captureToIdentityLike(a), captureToIdentityLike(b));
+}
+
+/** Reorder places within a collection based on a visible ID order. Hidden/filtered places keep their absolute position. */
+export function reorderPlaces(
+  allPlaces: CapturePlace[],
+  visibleIds: string[],
+): CapturePlace[] {
+  const idToNewIndex = new Map(visibleIds.map((id, idx) => [id, idx] as const));
+  const collectionId = allPlaces[0]?.collection_id;
+  if (!collectionId) return allPlaces;
+
+  // Get places NOT in the visible set (hidden/filtered) — keep them at the end
+  const hidden = allPlaces.filter((p) => !idToNewIndex.has(p.id));
+  // Get visible places in the new order
+  const visible = visibleIds
+    .map((id) => allPlaces.find((p) => p.id === id))
+    .filter((p): p is CapturePlace => p !== undefined);
+
+  return [...visible, ...hidden];
+}
+
+/**
+ * Merge research enrichment data into an existing CapturePlace.
+ *
+ * DOM-standard + user supremacy: a stored value survives when (a) the user
+ * hand-confirmed the field (user_overrides), or (b) the incoming value is
+ * fallback-sourced (incomingDetail) while a stored value exists. Gaps always
+ * fill; fresh DOM always wins; absent provenance preserves legacy behavior.
+ */
+export function mergePlaceResearch(
+  existing: CapturePlace,
+  incoming: Partial<CapturePlace>,
+  incomingDetail?: Partial<
+    Record<
+      | 'title'
+      | 'category'
+      | 'rating'
+      | 'reviewCount'
+      | 'priceLevel'
+      | 'address'
+      | 'phone'
+      | 'plusCode'
+      | 'openHours',
+      'dom' | 'jsonld' | 'appstate' | 'wire' | 'url' | undefined
+    >
+  >,
+): CapturePlace {
+  const overridden = new Set(existing.user_overrides ?? []);
+  const hasText = (value: string | undefined): value is string =>
+    typeof value === 'string' && value.trim().length > 0;
+  const takeText = (
+    key: string,
+    detailKey: keyof NonNullable<typeof incomingDetail>,
+    incomingValue: string | undefined,
+    storedValue: string | undefined,
+  ): string | undefined => {
+    if (!hasText(incomingValue)) return storedValue;
+    if (!hasText(storedValue)) return incomingValue;
+    if (overridden.has(key)) return storedValue;
+    const source = incomingDetail?.[detailKey];
+    if (source !== undefined && source !== 'dom') return storedValue;
+    return incomingValue;
+  };
+  const takeNumber = (
+    key: string,
+    detailKey: keyof NonNullable<typeof incomingDetail>,
+    incomingValue: number | undefined,
+    storedValue: number | undefined,
+  ): number | undefined => {
+    const valid = (value: number | undefined): value is number =>
+      typeof value === 'number' && Number.isFinite(value);
+    if (!valid(incomingValue)) return storedValue;
+    if (!valid(storedValue)) return incomingValue;
+    if (overridden.has(key)) return storedValue;
+    const source = incomingDetail?.[detailKey];
+    if (source !== undefined && source !== 'dom') return storedValue;
+    return incomingValue;
+  };
+
+  return {
+    ...existing,
+    user_overrides: Array.from(
+      new Set([...(existing.user_overrides ?? []), ...(incoming.user_overrides ?? [])]),
+    ),
+    title: takeText('title', 'title', incoming.title, existing.title) ?? existing.title,
+    source: {
+      ...existing.source,
+      ...(incoming.source || {}),
+      // A hand-bound place_id is identity the user verified: keep it until
+      // the user re-binds. (Re-scrapes with no id leave it untouched via ??.)
+      place_id: overridden.has('place_id')
+        ? (existing.source.place_id ?? incoming.source?.place_id)
+        : (incoming.source?.place_id ?? existing.source.place_id),
+      category: takeText('category', 'category', incoming.source?.category, existing.source.category),
+      types: incoming.source?.types
+        ? Array.from(new Set([...(incoming.source.types ?? []), ...(existing.source.types ?? [])]))
+        : existing.source.types,
+    },
+    address: takeText('address', 'address', incoming.address, existing.address),
+    coordinates: incoming.coordinates ?? existing.coordinates,
+    rating: takeNumber('rating', 'rating', incoming.rating, existing.rating),
+    review_count: takeNumber('review_count', 'reviewCount', incoming.review_count, existing.review_count),
+    phone: takeText('phone', 'phone', incoming.phone, existing.phone),
+    plus_code: takeText('plus_code', 'plusCode', incoming.plus_code, existing.plus_code),
+    open_hours: takeText('open_hours', 'openHours', incoming.open_hours, existing.open_hours),
+    menu_url: incoming.menu_url ?? existing.menu_url,
+    reservation_url: incoming.reservation_url ?? existing.reservation_url,
+    review_topics: incoming.review_topics ?? existing.review_topics,
+    service_options: incoming.service_options?.length ? incoming.service_options : existing.service_options,
+    // Merge price if incoming has data
+    price: incoming.price?.raw ? {
+      raw: incoming.price.raw,
+      currency: incoming.price.currency ?? existing.price?.currency,
+      min: incoming.price.min ?? existing.price?.min,
+      max: incoming.price.max ?? existing.price?.max,
+      unit: incoming.price.unit ?? existing.price?.unit,
+      level: incoming.price.level ?? existing.price?.level,
+    } : existing.price,
+    user: {
+      ...existing.user,
+      ...incoming.user,
+      tags: incoming.user?.tags
+        ? Array.from(new Set([...(incoming.user.tags ?? []), ...(existing.user?.tags ?? [])]))
+        : existing.user?.tags,
+    },
+    inferred_kind: overridden.has('kind')
+      ? (existing.inferred_kind ?? incoming.inferred_kind)
+      : incoming.inferred_kind && incoming.inferred_kind !== 'other'
+        ? incoming.inferred_kind
+        : existing.inferred_kind,
+    updated_at: new Date().toISOString(),
+  };
+}
