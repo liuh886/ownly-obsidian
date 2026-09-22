@@ -1,0 +1,1093 @@
+.wyqd-obsidian-view {
+  --wyqd-border: color-mix(in srgb, var(--background-modifier-border) 60%, transparent);
+  --wyqd-muted: var(--text-muted);
+  --wyqd-panel: var(--background-secondary);
+  --wyqd-panel-alt: var(--background-primary-alt);
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 0;
+}
+
+.wyqd-bar {
+  align-items: center;
+  background: var(--wyqd-panel);
+  border-bottom: 1px solid var(--wyqd-border);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: space-between;
+  padding: 8px 12px;
+}
+
+.wyqd-bar-brand {
+  align-items: baseline;
+  display: flex;
+  gap: 8px;
+}
+
+.wyqd-bar-brand strong {
+  font-size: 1.1em;
+}
+
+.wyqd-bar-brand span {
+  color: var(--wyqd-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.wyqd-bar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.wyqd-bar-btn {
+  background: var(--interactive-normal);
+  border: 1px solid var(--wyqd-border);
+  border-radius: 6px;
+  color: var(--text-normal);
+  cursor: pointer;
+  font-size: var(--font-ui-smaller);
+  padding: 4px 10px;
+}
+
+.wyqd-bar-btn:hover {
+  background: var(--interactive-hover);
+}
+
+.wyqd-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 1040px;
+  padding: 24px;
+}
+
+.wyqd-hero {
+  align-items: stretch;
+  background: var(--wyqd-panel);
+  border: 1px solid var(--wyqd-border);
+  border-radius: 10px;
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 320px);
+  padding: 16px;
+}
+
+.wyqd-hero h2 {
+  font-size: 1.6em;
+  letter-spacing: -0.02em;
+  margin: 0 0 6px;
+}
+
+.wyqd-hero p,
+.wyqd-note p {
+  color: var(--wyqd-muted);
+  margin: 0;
+}
+
+.wyqd-hero .wyqd-slogan {
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-medium);
+  margin-top: 8px;
+}
+
+.wyqd-eyebrow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.wyqd-eyebrow span {
+  background: var(--wyqd-panel-alt);
+  border: 1px solid var(--wyqd-border);
+  border-radius: 999px;
+  color: var(--wyqd-muted);
+  font-size: var(--font-ui-smaller);
+  font-weight: var(--font-medium);
+  padding: 3px 8px;
+}
+
+.wyqd-hero-metrics {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 1fr;
+}
+
+.wyqd-actions-panel {
+  background: transparent;
+}
+
+.wyqd-action-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+}
+
+.wyqd-action-card {
+  background: var(--background-primary);
+  border: 1px solid var(--wyqd-border);
+  border-radius: 8px;
+  color: var(--text-normal);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 74px;
+  padding: 12px;
+  text-align: left;
+  width: 100%;
+}
+
+.wyqd-action-card:hover,
+.wyqd-action-card:focus-visible {
+  border-color: var(--interactive-accent);
+}
+
+.wyqd-action-card strong {
+  font-size: var(--font-ui-small);
+}
+
+.wyqd-action-card span {
+  color: var(--wyqd-muted);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.35;
+}
+
+.wyqd-status-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.wyqd-status-item,
+.wyqd-console-panel,
+.wyqd-data-panel,
+.wyqd-detail-panel,
+.wyqd-error-panel,
+.wyqd-pro-entry,
+.wyqd-note {
+  background: var(--wyqd-panel);
+  border: 1px solid var(--wyqd-border);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.wyqd-runtime-grid .wyqd-status-item {
+  background: var(--background-primary);
+}
+
+.wyqd-status-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.wyqd-status-item span {
+  color: var(--wyqd-muted);
+  font-size: var(--font-ui-small);
+}
+
+.wyqd-status-item strong {
+  color: var(--text-normal);
+  font-weight: var(--font-semibold);
+}
+
+.wyqd-note {
+  background: var(--wyqd-panel-alt);
+}
+
+.wyqd-section-header {
+  margin-bottom: 12px;
+}
+
+.wyqd-section-header h3 {
+  margin: 0 0 4px;
+}
+
+.wyqd-section-header p {
+  color: var(--wyqd-muted);
+  margin: 0;
+}
+
+.wyqd-console-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.wyqd-workspace-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(260px, 0.9fr) minmax(320px, 1.1fr);
+}
+
+.wyqd-priority-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wyqd-object-row {
+  align-items: center;
+  background: var(--background-primary);
+  border: 1px solid var(--wyqd-border);
+  border-radius: 6px;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  min-height: 52px;
+  padding: 10px 12px;
+  text-align: left;
+  width: 100%;
+}
+
+.wyqd-object-row:hover,
+.wyqd-object-row.is-selected {
+  border-color: var(--interactive-accent);
+}
+
+.wyqd-object-row div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.wyqd-object-row strong,
+.wyqd-object-row span {
+  overflow-wrap: anywhere;
+}
+
+.wyqd-object-row div span {
+  color: var(--wyqd-muted);
+  font-size: var(--font-ui-small);
+}
+
+.wyqd-bucket {
+  border: 1px solid var(--wyqd-border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  flex: 0 0 auto;
+  font-size: var(--font-ui-smaller);
+  padding: 3px 8px;
+}
+
+.wyqd-bucket-pending {
+  background: rgba(var(--color-yellow-rgb), 0.14);
+  color: var(--text-normal);
+}
+
+.wyqd-bucket-active {
+  background: rgba(var(--color-green-rgb), 0.14);
+  color: var(--text-normal);
+}
+
+.wyqd-bucket-review {
+  background: rgba(var(--color-blue-rgb), 0.14);
+  color: var(--text-normal);
+}
+
+.wyqd-empty-state {
+  border: 1px dashed var(--wyqd-border);
+  border-radius: 6px;
+  color: var(--wyqd-muted);
+  padding: 14px;
+}
+
+.wyqd-data-panel {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+}
+
+.wyqd-detail-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.wyqd-detail-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.wyqd-body-preview {
+  background: var(--background-primary);
+  border: 1px solid var(--wyqd-border);
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 10px 12px;
+  white-space: pre-wrap;
+}
+
+.wyqd-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.wyqd-edit-form {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.wyqd-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.wyqd-field-wide {
+  grid-column: 1 / -1;
+}
+
+.wyqd-field label {
+  color: var(--wyqd-muted);
+  font-size: var(--font-ui-small);
+}
+
+.wyqd-field input,
+.wyqd-field select,
+.wyqd-field textarea {
+  width: 100%;
+}
+
+.wyqd-archive-row button {
+  flex: 0 0 auto;
+}
+
+.wyqd-secondary-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.wyqd-record-column {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.wyqd-record-column h4 {
+  margin: 0;
+}
+
+.wyqd-record-row,
+.wyqd-finding-row {
+  background: var(--background-primary);
+  border: 1px solid var(--wyqd-border);
+  border-radius: 6px;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  min-width: 0;
+  padding: 10px;
+}
+
+.wyqd-record-row div,
+.wyqd-finding-row div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.wyqd-record-row span,
+.wyqd-finding-row span,
+.wyqd-finding-row small {
+  color: var(--wyqd-muted);
+  overflow-wrap: anywhere;
+}
+
+.wyqd-record-row button {
+  flex: 0 0 auto;
+}
+
+.wyqd-finding-row strong {
+  text-transform: capitalize;
+}
+
+.wyqd-finding-error {
+  border-color: var(--text-error);
+}
+
+.wyqd-finding-warning {
+  border-color: var(--text-warning);
+}
+
+.wyqd-error-panel p {
+  color: var(--wyqd-muted);
+}
+
+.wyqd-pro-entry {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.wyqd-pro-entry p {
+  color: var(--wyqd-muted);
+  margin: 4px 0 0;
+}
+
+.wyqd-settings-view {
+  padding: 0;
+}
+
+.wyqd-settings-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 920px;
+  padding: 20px 0;
+}
+
+.wyqd-settings-hero {
+  align-items: stretch;
+  background: var(--wyqd-panel);
+  border: 1px solid var(--wyqd-border);
+  border-radius: 10px;
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 240px);
+  padding: 16px;
+}
+
+.wyqd-settings-hero h2 {
+  font-size: 1.6em;
+  letter-spacing: -0.02em;
+  margin: 0 0 6px;
+}
+
+.wyqd-settings-hero p {
+  color: var(--wyqd-muted);
+  margin: 0;
+}
+
+.wyqd-settings-membership,
+.wyqd-settings-panel {
+  background: var(--wyqd-panel);
+  border: 1px solid var(--wyqd-border);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.wyqd-settings-membership {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  justify-content: center;
+}
+
+.wyqd-settings-membership span,
+.wyqd-settings-membership small {
+  color: var(--wyqd-muted);
+  font-size: var(--font-ui-small);
+}
+
+.wyqd-settings-membership strong {
+  color: var(--text-normal);
+  font-size: 1.2em;
+}
+
+.wyqd-settings-panel {
+  overflow: hidden;
+}
+
+.wyqd-settings-panel .setting-item {
+  border-color: var(--wyqd-border);
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.wyqd-settings-panel .setting-item:last-child {
+  border-bottom: 0;
+}
+
+.wyqd-settings-active-banner {
+  background: rgba(16, 185, 129, 0.08);
+  border: 1px solid rgba(16, 185, 129, 0.2);
+  border-radius: 8px;
+  color: #059669;
+  font-size: var(--font-ui-small);
+  font-weight: 500;
+  padding: 10px 14px;
+}
+
+.wyqd-settings-activation-loading {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  padding: 8px 0;
+}
+
+/* Settings save bar */
+.wyqd-settings-save-bar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 0 8px;
+}
+
+.wyqd-settings-save-btn {
+  padding: 6px 16px;
+  font-size: var(--font-ui-small);
+}
+
+/* Folder suggestions */
+.wyqd-folder-suggestions {
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  margin-top: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+  box-shadow: var(--shadow-dropdown);
+}
+
+.wyqd-folder-suggestions--hidden {
+  display: none;
+}
+
+.wyqd-folder-suggestions--visible {
+  display: block;
+}
+
+.wyqd-license-key-input {
+  flex: 1;
+  font-family: monospace;
+}
+
+.wyqd-folder-suggestion-item {
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: var(--font-ui-small);
+  color: var(--text-normal);
+}
+
+.wyqd-folder-suggestion-item:hover {
+  background: var(--background-modifier-hover);
+}
+
+.wyqd-settings-cta-row {
+  margin-top: 8px;
+}
+
+.wyqd-settings-cta-row a {
+  color: var(--text-accent);
+  font-size: var(--font-ui-small);
+  text-decoration: none;
+}
+
+.wyqd-settings-cta-row a:hover {
+  text-decoration: underline;
+}
+
+.wyqd-settings-activation-msg {
+  border-radius: 8px;
+  font-size: var(--font-ui-small);
+  font-weight: 500;
+  padding: 8px 14px;
+  margin-bottom: 8px;
+}
+
+.wyqd-settings-activation-msg--success {
+  background: rgba(16, 185, 129, 0.08);
+  border: 1px solid rgba(16, 185, 129, 0.2);
+  color: #059669;
+}
+
+.wyqd-settings-activation-msg--error {
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  color: #dc2626;
+}
+
+@media (max-width: 560px) {
+  .wyqd-shell {
+    padding: 12px;
+  }
+
+  .wyqd-hero,
+  .wyqd-settings-hero,
+  .wyqd-workspace-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .wyqd-settings-shell {
+    padding: 12px 0;
+  }
+
+  .wyqd-pro-entry {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .wyqd-object-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
+
+/* Travel insights */
+.wyqd-travel-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.wyqd-travel-stats {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+}
+
+.wyqd-travel-map {
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.wyqd-travel-map svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.wyqd-travel-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wyqd-travel-timeline-entry {
+  align-items: center;
+  background: var(--background-primary);
+  border: 1px solid var(--wyqd-border);
+  border-radius: 6px;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  padding: 10px 12px;
+}
+
+/* License modal (web-only, styles for completeness) */
+.wyqd-license-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.wyqd-license-modal-panel {
+  background: var(--background-primary);
+  border: 1px solid var(--wyqd-border);
+  border-radius: 10px;
+  padding: 20px;
+  max-width: 400px;
+  width: 90%;
+}
+
+/* Status badges for travel timeline */
+.wyqd-status-badge {
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  display: inline-block;
+}
+
+.wyqd-status-badge--planned {
+  background: rgba(59, 130, 246, 0.1);
+  color: #2563eb;
+}
+
+.wyqd-status-badge--completed {
+  background: rgba(16, 185, 129, 0.1);
+  color: #059669;
+}
+
+.wyqd-status-badge--reviewed {
+  background: var(--background-modifier-border);
+  color: var(--text-muted);
+}
+
+/* Obsidian runtime overrides — React mount point inherits Obsidian's font stack */
+.wyqd-runtime-obsidian {
+  font-family: var(--font-interface);
+  font-size: var(--font-ui-medium);
+  overflow-y: auto;
+}
+
+/* Ensure consistent box-sizing for all React UI elements inside Obsidian */
+.wyqd-runtime-obsidian *,
+.wyqd-runtime-obsidian *::before,
+.wyqd-runtime-obsidian *::after {
+  box-sizing: border-box;
+}
+
+/* Ensure the React UI fills the Obsidian view */
+.wyqd-runtime-obsidian > div {
+  min-height: 100%;
+}
+
+/* Obsidian dark mode: use the same design tokens as the web shell.
+   The CSS variables in globals.css handle the color mapping. */
+.theme-dark .wyqd-runtime-obsidian {
+  --background: #0c0a09;
+  --foreground: #fafaf9;
+  --surface-card: #1c1917;
+  --surface-secondary: #292524;
+  --surface-tertiary: #44403c;
+  --border-default: #44403c;
+  --border-subtle: #292524;
+  --text-primary: #fafaf9;
+  --text-secondary: #a8a29e;
+  --text-tertiary: #78716c;
+  --text-inverse: #1c1917;
+  --accent-positive: #34d399;
+  --accent-pending: #fbbf24;
+  --accent-negative: #f87171;
+  --accent-info: #38bdf8;
+}
+
+/* Obsidian dark mode surface overrides */
+.theme-dark .wyqd-runtime-obsidian .bg-white {
+  background-color: var(--surface-card);
+}
+.theme-dark .wyqd-runtime-obsidian .bg-stone-50 {
+  background-color: var(--surface-secondary);
+}
+.theme-dark .wyqd-runtime-obsidian .bg-stone-100,
+.theme-dark .wyqd-runtime-obsidian .bg-stone-200 {
+  background-color: var(--surface-tertiary);
+}
+.theme-dark .wyqd-runtime-obsidian .bg-stone-950 {
+  background-color: var(--surface-card);
+  color: var(--text-primary);
+}
+.theme-dark .wyqd-runtime-obsidian .border-stone-200,
+.theme-dark .wyqd-runtime-obsidian .border-stone-300 {
+  border-color: var(--border-default);
+}
+.theme-dark .wyqd-runtime-obsidian .border-stone-100 {
+  border-color: var(--border-subtle);
+}
+.theme-dark .wyqd-runtime-obsidian .ring-stone-200 {
+  --tw-ring-color: var(--border-default);
+}
+.theme-dark .wyqd-runtime-obsidian .text-stone-950,
+.theme-dark .wyqd-runtime-obsidian .text-stone-900 {
+  color: var(--text-primary);
+}
+.theme-dark .wyqd-runtime-obsidian .text-stone-700,
+.theme-dark .wyqd-runtime-obsidian .text-stone-600,
+.theme-dark .wyqd-runtime-obsidian .text-stone-500 {
+  color: var(--text-secondary);
+}
+.theme-dark .wyqd-runtime-obsidian .text-stone-400 {
+  color: var(--text-tertiary);
+}
+.theme-dark .wyqd-runtime-obsidian .text-white {
+  color: var(--text-primary);
+}
+.theme-dark .wyqd-runtime-obsidian input,
+.theme-dark .wyqd-runtime-obsidian select,
+.theme-dark .wyqd-runtime-obsidian textarea {
+  background-color: var(--surface-secondary);
+  border-color: var(--border-default);
+  color: var(--text-primary);
+}
+.theme-dark .wyqd-runtime-obsidian input::placeholder,
+.theme-dark .wyqd-runtime-obsidian textarea::placeholder {
+  color: var(--text-tertiary);
+}
+.theme-dark .wyqd-runtime-obsidian .border-dashed {
+  border-color: var(--border-default);
+  background-color: var(--surface-secondary);
+}
+
+/*
+ * Interactive card resets — override Obsidian's default button styles.
+ * Obsidian flattens <button> into a compact inline row; we use higher
+ * specificity (.wyqd-runtime-obsidian) to reclaim block layout, min-height,
+ * and padding.
+ */
+
+/* ---- Action Card (top-left "today actions" + 3 white cards) ---- */
+.wyqd-runtime-obsidian .wyqd-card-action {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  min-height: 140px;
+  height: auto;
+  padding: 20px;
+  border-radius: 12px;
+  text-align: left;
+  overflow: hidden;
+  gap: 0;
+  border: 1px solid var(--wyqd-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  white-space: normal;
+  line-height: normal;
+}
+
+.wyqd-card-action:hover,
+.wyqd-card-action:focus-visible {
+  border-color: var(--interactive-accent);
+}
+
+.wyqd-runtime-obsidian .wyqd-card-action--dark {
+  background: var(--background-modifier-border);
+  border-color: transparent;
+}
+
+.wyqd-card-action__label {
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-medium);
+  color: var(--text-muted);
+}
+
+.wyqd-card-action__count {
+  margin-top: 12px;
+  font-family: var(--font-monospace);
+  font-size: 2em;
+  font-weight: var(--font-semibold);
+  color: var(--text-normal);
+}
+
+.wyqd-card-action__hint {
+  margin-top: 4px;
+  font-size: var(--font-ui-small);
+  color: var(--text-muted);
+}
+
+.wyqd-card-action__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.wyqd-card-action__badge {
+  background: var(--background-secondary);
+  border: 1px solid var(--wyqd-border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  font-weight: var(--font-medium);
+  padding: 2px 8px;
+}
+
+.wyqd-card-action__arrow {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+
+.wyqd-card-action:hover .wyqd-card-action__arrow {
+  color: var(--text-normal);
+}
+
+.wyqd-card-action__title {
+  margin-top: 14px;
+  font-size: var(--font-ui-medium);
+  font-weight: var(--font-semibold);
+  line-height: 1.3;
+  color: var(--text-normal);
+}
+
+.wyqd-card-action__desc {
+  margin-top: 4px;
+  font-size: var(--font-ui-small);
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+/* ---- Insight Card ("highest daily cost", "largest monthly", etc.) ---- */
+.wyqd-runtime-obsidian .wyqd-card-insight {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  min-height: 120px;
+  height: auto;
+  padding: 20px;
+  border-radius: 12px;
+  text-align: left;
+  gap: 0;
+  border: 1px solid var(--wyqd-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  white-space: normal;
+  line-height: normal;
+}
+
+.wyqd-card-insight--clickable:hover,
+.wyqd-card-insight--clickable:focus-visible {
+  border-color: var(--interactive-accent);
+}
+
+.wyqd-card-insight__label {
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-medium);
+  color: var(--text-muted);
+}
+
+.wyqd-card-insight__title {
+  margin-top: 8px;
+  min-height: 2.5em;
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-semibold);
+  line-height: 1.35;
+  color: var(--text-normal);
+}
+
+.wyqd-card-insight__footer {
+  margin-top: 12px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.wyqd-card-insight__value {
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-large);
+  font-weight: var(--font-semibold);
+  color: var(--text-normal);
+}
+
+.wyqd-card-insight__detail {
+  font-size: var(--font-ui-small);
+  color: var(--text-muted);
+  text-align: right;
+}
+
+/* ---- Watchlist Card (recurring costs, pending reviews) ---- */
+.wyqd-runtime-obsidian .wyqd-card-watchlist {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 72px;
+  height: auto;
+  padding: 16px 20px;
+  border-radius: 12px;
+  text-align: left;
+  gap: 16px;
+  border: 1px solid var(--wyqd-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  white-space: normal;
+  line-height: normal;
+}
+
+.wyqd-card-watchlist:hover {
+  border-color: var(--interactive-accent);
+}
+
+.wyqd-card-watchlist__main {
+  min-width: 0;
+  flex: 1;
+}
+
+.wyqd-card-watchlist__title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.wyqd-card-watchlist__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.wyqd-card-watchlist__dot--amber {
+  background: #f59e0b;
+}
+
+.wyqd-card-watchlist__dot--green {
+  background: #10b981;
+}
+
+.wyqd-card-watchlist__title {
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-semibold);
+  color: var(--text-normal);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wyqd-card-watchlist__meta {
+  margin-top: 4px;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
+
+.wyqd-card-watchlist__amount {
+  flex-shrink: 0;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-semibold);
+  color: var(--text-normal);
+}
+
+.wyqd-card-watchlist__action {
+  flex-shrink: 0;
+  border: 1px solid var(--wyqd-border);
+  border-radius: 999px;
+  background: var(--background-secondary);
+  padding: 2px 10px;
+  font-size: var(--font-ui-smaller);
+  font-weight: var(--font-medium);
+  color: var(--text-muted);
+}
+
+/* ---- Ranking Board entries ---- */
+/* Obsidian flattens <button> into compact inline rows; use high-specificity
+   selectors to restore block layout, padding, and line-height without !important. */
+.wyqd-runtime-obsidian.wyqd-runtime-obsidian button.flex.w-full.items-center {
+  display: flex;
+  padding: 8px 12px;
+  height: auto;
+  min-height: 48px;
+  line-height: 1.4;
+  white-space: normal;
+  text-align: left;
+}
+
+/* Review list item buttons (Detail, Delete, Review) */
+.wyqd-runtime-obsidian.wyqd-runtime-obsidian .space-y-2 > div button.rounded-md {
+  display: inline-flex;
+  align-items: center;
+  height: auto;
+  padding: 6px 10px;
+  line-height: 1;
+}
+
+/* Imperative DOM utilities shared with the Web runtime. Runtime code toggles
+   these classes instead of assigning inline styles. */
+.ownly-map-panning {
+  will-change: transform;
+}
+body.ownly-scroll-locked {
+  overflow: hidden;
+}
+.ownly-clipboard-proxy {
+  position: fixed;
+  left: -9999px;
+  top: -9999px;
+}
