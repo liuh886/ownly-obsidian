@@ -1,0 +1,53 @@
+import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
+
+export interface ParsedMarkdown<T extends object> {
+  frontmatter: T;
+  body: string;
+}
+
+/**
+ * Symbol-keyed sidecar for a file's Markdown body on parsed entities.
+ * Survives `{...spread}` updates (symbols copy), is ignored by YAML/JSON
+ * serialization, and lets stageUpsertEntity rewrite frontmatter without
+ * silently deleting user notes written below it.
+ */
+export const ENTITY_BODY: unique symbol = Symbol('ownlyEntityBody');
+
+const FRONTMATTER_PATTERN = /^\uFEFF?---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
+
+export function parseMarkdownEntity<T extends object = Record<string, unknown>>(
+  content: string,
+): ParsedMarkdown<T> {
+  const match = content.match(FRONTMATTER_PATTERN);
+
+  if (!match) {
+    throw new Error('Markdown file does not contain YAML frontmatter.');
+  }
+
+  const parsed: unknown = parseYaml(match[1] || '{}');
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('YAML frontmatter is not a valid object.');
+  }
+
+  const frontmatterRecord = parsed as Record<string, unknown>;
+  const body = content.slice(match[0].length);
+
+  const requiredFields = ['schema_version', 'id', 'type'] as const;
+  const missing = requiredFields.filter((field) => !(field in frontmatterRecord));
+  if (missing.length > 0) {
+    throw new Error(`Frontmatter missing required fields: ${missing.join(', ')}`);
+  }
+
+  return { frontmatter: parsed as T, body };
+}
+
+export function serializeMarkdownEntity<T extends object>(
+  frontmatter: T,
+  body = '',
+): string {
+  const yaml = stringifyYaml(frontmatter).trimEnd();
+  const normalizedBody = body.startsWith('\n') || body.length === 0 ? body : `\n${body}`;
+
+  return `---\n${yaml}\n---\n${normalizedBody}`;
+}

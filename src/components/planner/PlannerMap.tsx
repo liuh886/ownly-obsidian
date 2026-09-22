@@ -1,0 +1,1642 @@
+'use client';
+
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { PlannerTripLeg, PlannerTripPlace } from '@/domain/planner';
+import { plannerTripLegId } from '@/domain/planner';
+import type { PlannerScheduledPlace } from '@/domain/planner-visits';
+import { buildSegmentBadges } from './map-badges';
+import { clusterMarkersByCoordinates } from './map-markers';
+import { MapPlaceCard } from './MapPlaceCard';
+
+/**
+ * Per-segment dash encoding for the active route. motorized modes stay solid;
+ * walking/cycling dot, transit long-dash. Unknown/missing legs fall back solid.
+ */
+function routeDashForMode(mode?: string): string | undefined {
+  if (mode === 'walking' || mode === 'bicycling') return '2 4';
+  if (mode === 'transit') return '8 6';
+  return undefined;
+}
+import {
+  calculateBounds,
+  extractPlaceCoordinates,
+  getPlannerMapDefaultCenter,
+  PLANNER_KIND_ICONS,
+} from '@/domain/planner';
+import {
+  isDayLit,
+  resolveLayerPoints,
+  routeStrokeForDay,
+} from './map-layers';
+import { searchCities } from '@/domain/travel';
+
+interface PlannerMapProps {
+  scheduledPlaces: PlannerScheduledPlace[];
+  candidatePlaces: PlannerTripPlace[];
+  allPlacesByDate?: Record<string, PlannerScheduledPlace[]>;
+  tripDates?: string[];
+  destinations?: string[];
+  activeDate?: string;
+  activeDayIndex: number;
+  highlightedPlaceId?: string | null;
+  onSchedulePlace: (placeId: string, sortOrder?: number) => void | Promise<void>;
+  onUnschedulePlace: (place: PlannerScheduledPlace) => void | Promise<void>;
+  onShelvePlace?: (placeId: string) => void | Promise<void>;
+  onDeletePlace?: (placeId: string, placeTitle?: string) => void | Promise<void>;
+  onHoverPlace?: (placeId: string | null) => void;
+  visitCountByPlaceId?: Map<string, number>;
+  language?: 'zh' | 'en';
+  /** Compact (sidebar) maps hide the day legend to save space. Defaults to true. */
+  showLegend?: boolean;
+  /**
+   * Compact variant (sidebar): smaller markers, collapsed controls, two-line
+   * popover. Independent from showLegend so each concern stays explicit.
+   * Defaults to 'full'.
+   */
+  variant?: 'compact' | 'full';
+  /** Persisted legs keyed by leg id, shared from PlannerHome (built once). */
+  legByPair?: Map<string, PlannerTripLeg>;
+  /** Trip id used to resolve leg ids for segment badges. */
+  tripId?: string;
+  /**
+   * Timeline-to-map locate request: centers the map on the stop's coordinates
+   * (zoom unchanged). Both instances consume the same nonce idempotently.
+   */
+  locateRequest?: { placeId: string; nonce: number } | null;
+  /**
+   * Shared viewport owned by PlannerHome so the sidebar and expanded instances
+   * continue each other's view instead of auto-fitting on every mount.
+   * Only the visible instance writes (see ownsSharedView).
+   */
+  sharedViewRef?: { current: { center: { lat: number; lng: number }; zoom: number } | null };
+  ownsSharedView?: boolean;
+}
+
+interface Point {
+  place: PlannerTripPlace | PlannerScheduledPlace;
+  lat: number;
+  lng: number;
+  isScheduled: boolean;
+  order?: number;
+  dayIndex?: number;
+  isActiveDay?: boolean;
+}
+
+/**
+ * Canonical place identity for counting/selection: scheduled occurrences
+ * carry the visit id in `place.id`, so fall back to the underlying place_id.
+ */
+function canonicalPlaceId(place: PlannerTripPlace | PlannerScheduledPlace): string {
+  return (place as PlannerScheduledPlace).place_id ?? place.id;
+}
+
+const KIND_EMOJI = PLANNER_KIND_ICONS;
+
+// CARTO raster tiles serve an "API key required" watermark without a key.
+// Key source: GitHub repository secret CARTO_BASEMAP_KEY -> build env
+// NEXT_PUBLIC_CARTO_BASEMAP_KEY (see .github/workflows/pages.yml);
+// local dev override via .env.local. Attribution stays mandatory per CARTO/OSM terms.
+const CARTO_KEY = process.env.NEXT_PUBLIC_CARTO_BASEMAP_KEY?.trim() || undefined;
+
+function cartoTile(path: string, z: number, x: number, y: number): string {
+  // Retina screens fetch @2x tiles so text and roads stay crisp at fractional zooms.
+  const hidpi = typeof window !== 'undefined' && (window.devicePixelRatio ?? 1) > 1;
+  const url = `https://basemaps.cartocdn.com/${path}/${z}/${x}/${y}${hidpi ? '@2x' : ''}.png`;
+  return CARTO_KEY ? `${url}?key=${encodeURIComponent(CARTO_KEY)}` : url;
+}
+
+export type BasemapStyle = 'carto_voyager' | 'carto_voyager_nolabels' | 'carto_positron' | 'carto_dark' | 'osm_standard' | 'esri_satellite';
+
+export interface BasemapAttribution {
+  text: string;
+  href: string;
+}
+
+export interface BasemapOption {
+  id: BasemapStyle;
+  label: { zh: string; en: string };
+  icon: string;
+  getUrl: (z: number, x: number, y: number) => string;
+  fallbackUrl?: (z: number, x: number, y: number) => string;
+  bgColor: string;
+  /** Tile-source attribution rendered in the footer (per provider terms). */
+  attribution: BasemapAttribution[];
+}
+
+const OSM_ATTRIBUTION: BasemapAttribution = { text: 'OpenStreetMap', href: 'https://www.openstreetmap.org/copyright' };
+const CARTO_ATTRIBUTION: BasemapAttribution = { text: 'CARTO', href: 'https://carto.com/attributions' };
+const ESRI_ATTRIBUTION: BasemapAttribution = { text: 'Powered by Esri', href: 'https://www.esri.com' };
+const ESRI_SOURCES_ATTRIBUTION: BasemapAttribution = {
+  text: 'Esri, Maxar, Earthstar Geographics',
+  href: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer',
+};
+
+export const BASEMAP_OPTIONS: BasemapOption[] = [
+  {
+    id: 'carto_voyager',
+    label: { zh: '淡彩旅行', en: 'Voyager' },
+    icon: '🧭',
+    getUrl: (z, x, y) => cartoTile('rastertiles/voyager', z, x, y),
+    fallbackUrl: (z, x, y) => `https://tile.openstreetmap.org/${z}/${x}/${y}.png`,
+    bgColor: '#e5e7eb',
+    attribution: [OSM_ATTRIBUTION, CARTO_ATTRIBUTION],
+  },
+  {
+    id: 'carto_voyager_nolabels',
+    label: { zh: '纯净无字', en: 'No Labels' },
+    icon: '◻️',
+    getUrl: (z, x, y) => cartoTile('rastertiles/voyager_nolabels', z, x, y),
+    fallbackUrl: (z, x, y) => `https://tile.openstreetmap.org/${z}/${x}/${y}.png`,
+    bgColor: '#e5e7eb',
+    attribution: [OSM_ATTRIBUTION, CARTO_ATTRIBUTION],
+  },
+  {
+    id: 'carto_positron',
+    label: { zh: '极简浅灰', en: 'Positron' },
+    icon: '⚪',
+    getUrl: (z, x, y) => cartoTile('light_all', z, x, y),
+    fallbackUrl: (z, x, y) => `https://tile.openstreetmap.org/${z}/${x}/${y}.png`,
+    bgColor: '#f3f4f6',
+    attribution: [OSM_ATTRIBUTION, CARTO_ATTRIBUTION],
+  },
+  {
+    id: 'carto_dark',
+    label: { zh: '深邃夜景', en: 'Dark' },
+    icon: '🌑',
+    getUrl: (z, x, y) => cartoTile('dark_all', z, x, y),
+    fallbackUrl: (z, x, y) => `https://tile.openstreetmap.org/${z}/${x}/${y}.png`,
+    bgColor: '#18181b',
+    attribution: [OSM_ATTRIBUTION, CARTO_ATTRIBUTION],
+  },
+  {
+    id: 'osm_standard',
+    label: { zh: '开源标准', en: 'OSM' },
+    icon: '🗺️',
+    getUrl: (z, x, y) => `https://tile.openstreetmap.org/${z}/${x}/${y}.png`,
+    fallbackUrl: (z, x, y) => cartoTile('rastertiles/voyager', z, x, y),
+    bgColor: '#e5e7eb',
+    attribution: [OSM_ATTRIBUTION],
+  },
+  {
+    id: 'esri_satellite',
+    label: { zh: '卫星实景', en: 'Satellite' },
+    icon: '🛰️',
+    getUrl: (z, x, y) => `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`,
+    fallbackUrl: (z, x, y) => cartoTile('rastertiles/voyager', z, x, y),
+    bgColor: '#1c1917',
+    attribution: [ESRI_ATTRIBUTION, ESRI_SOURCES_ATTRIBUTION],
+  },
+];
+
+// One identity color per trip day (cycles every 8 days) for markers and routes.
+export const PLANNER_DAY_COLORS = ['#047857', '#0284c7', '#b45309', '#7c3aed', '#e11d48', '#0f766e', '#ea580c', '#4f46e5'];
+
+export function plannerDayColor(dayIndex?: number): string {
+  const index = dayIndex ?? 0;
+  return PLANNER_DAY_COLORS[((index % PLANNER_DAY_COLORS.length) + PLANNER_DAY_COLORS.length) % PLANNER_DAY_COLORS.length];
+}
+
+// Web Mercator projection
+function projectLngToX(lng: number, zoom: number): number {
+  return ((lng + 180) / 360) * Math.pow(2, zoom) * 256;
+}
+
+function projectLatToY(lat: number, zoom: number): number {
+  const latRad = Math.max(-85.0511, Math.min(85.0511, lat)) * (Math.PI / 180);
+  return (
+    (1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) /
+    2 *
+    Math.pow(2, zoom) *
+    256
+  );
+}
+
+const MIN_ZOOM = 3;
+const MAX_ZOOM = 18;
+const ZOOM_STEP_BUTTON = 1;
+const ZOOM_STEP_WHEEL = 0.5;
+// Both variants share one fit rule: span-table zoom plus a fixed bump so the
+// stops fill the view instead of sitting in empty air. The compact sidebar
+// skips the viewport guard (its narrow strip would otherwise force the whole
+// span on screen and read zoomed-out); the expanded big map deliberately uses
+// the exact same rule so its scale (meters per pixel) matches the sidebar.
+const COMPACT_FIT_ZOOM_BUMP = 1.5;
+
+// Native tooltip shows the place name on line 1 and the recommendation reason (why) on line 2.
+function markerTitle(firstLine: string, why?: string): string {
+  const reason = (why ?? '').trim().replace(/\s+/g, ' ');
+  if (!reason) return firstLine;
+  const short = reason.length > 80 ? `${reason.slice(0, 80)}…` : reason;
+  return `${firstLine}\n${short}`;
+}
+
+export function PlannerMap({
+  scheduledPlaces,
+  candidatePlaces,
+  allPlacesByDate,
+  tripDates,
+  destinations,
+  activeDate,
+  activeDayIndex,
+  highlightedPlaceId,
+  onSchedulePlace,
+  onUnschedulePlace,
+  onShelvePlace,
+  onHoverPlace,
+  visitCountByPlaceId,
+  language = 'zh',
+  showLegend = true,
+  variant = 'full',
+  legByPair,
+  tripId,
+  locateRequest,
+  sharedViewRef,
+  ownsSharedView = true,
+}: PlannerMapProps) {
+  const compact = variant === 'compact';
+  const zh = language === 'zh';
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  const [selectedPlaceId, setSelectedPlaceId] = useState<string | null>(null);
+  // Open cluster key (exact-duplicate-coordinate stack): shows a member list
+  // so every stacked place stays reachable instead of zoom-only.
+  const [openClusterKey, setOpenClusterKey] = useState<string | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  // Layer model (additive, replaces the old exclusive filterMode + solo):
+  // base = active day always; "all routes" and "candidate pool" are overlays;
+  // the legend lights individual days in their own colors.
+  const [showRoutesLayer, setShowRoutesLayer] = useState(false);
+  const [showCandidates, setShowCandidates] = useState(true);
+  const [coloredDays, setColoredDays] = useState<number[]>([]);
+  const [controlsMenuOpen, setControlsMenuOpen] = useState(false);
+  const [basemapStyle, setBasemapStyle] = useState<BasemapStyle>(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        const saved = window.localStorage.getItem('ownly_planner_basemap_style') as BasemapStyle | null;
+        if (saved && BASEMAP_OPTIONS.some((opt) => opt.id === saved)) {
+          return saved;
+        }
+      } catch { /* best-effort; failure is non-fatal */ }
+    }
+    return 'carto_positron';
+  });
+
+  const handleBasemapChange = useCallback((newStyle: BasemapStyle) => {
+    setBasemapStyle(newStyle);
+    try {
+      window.localStorage.setItem('ownly_planner_basemap_style', newStyle);
+    } catch { /* best-effort; failure is non-fatal */ }
+  }, []);
+
+  const activeBasemap = useMemo(
+    () => BASEMAP_OPTIONS.find((opt) => opt.id === basemapStyle) ?? BASEMAP_OPTIONS[0],
+    [basemapStyle],
+  );
+
+  // Multi-day points across all trip dates
+  const multiDayPoints = useMemo<Point[]>(() => {
+    if (!allPlacesByDate || !tripDates || tripDates.length === 0) return [];
+    const result: Point[] = [];
+
+    tripDates.forEach((date, dIdx) => {
+      const dayPlaces = allPlacesByDate[date] || [];
+      const isActiveDay = date === activeDate || dIdx === activeDayIndex;
+
+      dayPlaces.forEach((place, index) => {
+        const coords = extractPlaceCoordinates(place);
+        if (coords) {
+          result.push({
+            place,
+            lat: coords.lat,
+            lng: coords.lng,
+            isScheduled: true,
+            order: index + 1,
+            dayIndex: dIdx,
+            isActiveDay,
+          });
+        }
+      });
+    });
+
+    return result;
+  }, [allPlacesByDate, tripDates, activeDate, activeDayIndex]);
+
+  // Full point set; visibility is resolved per-layer below. The active day
+  // prefers multi-day points (per-day order), falling back to the
+  // scheduledPlaces prop for viewers without allPlacesByDate.
+  const points = useMemo<Point[]>(() => {
+    const activeFromMulti = multiDayPoints.filter((p) => p.isActiveDay);
+    const result: Point[] = activeFromMulti.length > 0 ? [...activeFromMulti] : [];
+
+    if (activeFromMulti.length === 0) {
+      scheduledPlaces.forEach((place, index) => {
+        const coords = extractPlaceCoordinates(place);
+        if (coords) {
+          result.push({
+            place,
+            lat: coords.lat,
+            lng: coords.lng,
+            isScheduled: true,
+            order: index + 1,
+            dayIndex: activeDayIndex,
+            isActiveDay: true,
+          });
+        }
+      });
+    }
+
+    multiDayPoints.forEach((p) => {
+      if (!p.isActiveDay) result.push(p);
+    });
+
+    candidatePlaces.forEach((place) => {
+      const coords = extractPlaceCoordinates(place);
+      if (coords) {
+        result.push({
+          place,
+          lat: coords.lat,
+          lng: coords.lng,
+          isScheduled: false,
+        });
+      }
+    });
+
+    return result;
+  }, [multiDayPoints, scheduledPlaces, candidatePlaces, activeDayIndex]);
+
+  // Default center based on active day schedule (last scheduled point) or candidate pool (last imported point)
+  const defaultCenter = useMemo(
+    () => getPlannerMapDefaultCenter(scheduledPlaces, candidatePlaces),
+    [scheduledPlaces, candidatePlaces],
+  );
+
+  // Fit basis: the candidate pool is a pure show/hide overlay and never
+  // drives the viewport. All fit targets (initial, fit button, auto-refit,
+  // out-of-view check) are schedule-only; the pool is used only when the
+  // trip has no scheduled stops yet (candidate-only trip).
+  const scheduleFitBasis = useMemo(() => {
+    const layered = resolveLayerPoints(points, { showRoutesLayer, showCandidates: false });
+    if (layered.length > 0) return layered;
+    const scheduled = points.filter((p) => p.isScheduled);
+    if (scheduled.length > 0) return scheduled;
+    return points;
+  }, [points, showRoutesLayer]);
+
+  // Initial bounds with the shared compact rule. The auto-fit effect below
+  // takes over afterwards.
+  const initial = useMemo(() => {
+    return calculateBounds(scheduleFitBasis, { extraZoom: COMPACT_FIT_ZOOM_BUMP });
+  }, [scheduleFitBasis]);
+  // A shared view adopted at mount suppresses the first auto-fit below.
+  // Only the sidebar adopts: the expanded big map always fresh-fits with the
+  // shared rule so opening it deterministically shows the sidebar-scale view
+  // instead of inheriting a stale zoom.
+  const skipInitialFitRef = useRef(false);
+  const [center, setCenter] = useState<{ lat: number; lng: number }>(() => defaultCenter ?? initial.center);
+  const [zoom, setZoom] = useState(initial.zoom);
+  // Mount-only adoption runs before the auto-fit effect (layout vs passive),
+  // so an adopted view never flashes through a fitted one.
+  useLayoutEffect(() => {
+    if (!compact) return;
+    const shared = sharedViewRef?.current;
+    if (shared) {
+      skipInitialFitRef.current = true;
+      setCenter(shared.center);
+      setZoom(shared.zoom);
+    }
+  }, [sharedViewRef, compact]);
+
+  // Viewport continuity: only the visible instance writes; a newly visible
+  // instance adopts the last written view instead of auto-fitting.
+  useEffect(() => {
+    if (ownsSharedView && sharedViewRef) {
+      sharedViewRef.current = { center, zoom };
+    }
+  }, [center, zoom, ownsSharedView, sharedViewRef]);
+  const wasViewOwnerRef = useRef(ownsSharedView);
+  useEffect(() => {
+    const gained = ownsSharedView && !wasViewOwnerRef.current;
+    wasViewOwnerRef.current = ownsSharedView;
+    if (gained && sharedViewRef?.current) {
+      setCenter(sharedViewRef.current.center);
+      setZoom(sharedViewRef.current.zoom);
+    }
+  }, [ownsSharedView, sharedViewRef]);
+
+  // Fallback geocode destination using Ownly's cities.json database
+  useEffect(() => {
+    if (points.length === 0 && destinations && destinations.length > 0) {
+      let active = true;
+      void searchCities(destinations[0], 1).then((results) => {
+        if (!active || results.length === 0) return;
+        setCenter({ lat: results[0].latitude, lng: results[0].longitude });
+        setZoom(13);
+      });
+      return () => {
+        active = false;
+      };
+    }
+  }, [destinations, points.length]);
+
+  // Pan visual layer: during a drag only tiles + route SVGs translate via refs
+  // (no React state churn); markers/badges/popover stay frozen and snap on release.
+  const tilesWrapRef = useRef<HTMLDivElement>(null);
+  const routesWrapRef = useRef<HTMLDivElement>(null);
+  const panOffsetRef = useRef<{ dx: number; dy: number } | null>(null);
+  const applyPanTransform = useCallback((dx: number, dy: number) => {
+    const transform = `translate3d(${dx}px, ${dy}px, 0)`;
+    if (tilesWrapRef.current) {
+      tilesWrapRef.current.style.transform = transform;
+      tilesWrapRef.current.classList.add('ownly-map-panning');
+    }
+    if (routesWrapRef.current) {
+      routesWrapRef.current.style.transform = transform;
+      routesWrapRef.current.classList.add('ownly-map-panning');
+    }
+  }, []);
+  const clearPanTransform = useCallback(() => {
+    panOffsetRef.current = null;
+    if (tilesWrapRef.current) {
+      tilesWrapRef.current.style.removeProperty('transform');
+      tilesWrapRef.current.classList.remove('ownly-map-panning');
+    }
+    if (routesWrapRef.current) {
+      routesWrapRef.current.style.removeProperty('transform');
+      routesWrapRef.current.classList.remove('ownly-map-panning');
+    }
+  }, []);
+
+  const layerSig = `${showRoutesLayer ? 1 : 0}|${showCandidates ? 1 : 0}|${[...coloredDays].sort((a, b) => a - b).join(',')}`;
+
+  // Layer actions shared by the controls and the legend.
+  const resetLayers = useCallback(() => {
+    setShowRoutesLayer(false);
+    setShowCandidates(true);
+    setColoredDays([]);
+  }, []);
+
+  const toggleDay = useCallback((dayIndex: number, currentActive: number) => {
+    if (dayIndex === currentActive) return;
+    setColoredDays((prev) => {
+      if (prev.includes(dayIndex)) return prev.filter((d) => d !== dayIndex);
+      return [...prev, dayIndex];
+    });
+  }, []);
+
+  // Stale cluster lists never linger: day or layer changes rebuild the
+  // marker layout, so a coordinate-keyed list from before may no longer exist.
+  // No-op render when already closed (React bails out on identical state).
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset transient cluster UI when the active day or layer changes
+    setOpenClusterKey(null);
+  }, [activeDate, activeDayIndex, layerSig]);
+
+  // Esc closes inner map UI first (basemap menu → cluster list → marker
+  // card) and swallows the key so an outer closer (e.g. big-map Esc) never
+  // fires for the same press. SELECT targets are left to native behavior
+  // (collapsing the dropdown).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      const target = e.target as HTMLElement | null;
+      if (target && target.tagName === 'SELECT') return;
+      if (controlsMenuOpen) {
+        e.stopImmediatePropagation();
+        setControlsMenuOpen(false);
+      } else if (openClusterKey) {
+        e.stopImmediatePropagation();
+        setOpenClusterKey(null);
+      } else if (selectedPlaceId) {
+        e.stopImmediatePropagation();
+        setSelectedPlaceId(null);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [controlsMenuOpen, openClusterKey, selectedPlaceId]);
+
+  // Dimensions (declared early: fit helpers below read the live size).
+  const [containerSize, setContainerSize] = useState<{ width: number; height: number }>({ width: 400, height: 350 });
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (entry) {
+        setContainerSize({
+          width: entry.contentRect.width,
+          height: entry.contentRect.height,
+        });
+      }
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+  const clampZoom = useCallback((value: number) => Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, value)), []);
+
+  const viewportSize = useCallback(() => ({
+    width: containerSize.width || containerRef.current?.clientWidth || 400,
+    height: containerSize.height || containerRef.current?.clientHeight || 300,
+  }), [containerSize.height, containerSize.width]);
+
+  // Single choke point for every auto-fit. Both variants use the identical
+  // shared rule (span table + bump, no viewport guard) so big map and sidebar
+  // render the same scale for the same stops. Clamped to the allowed range.
+  const fitToPoints = useCallback((pts: Array<{ lat: number; lng: number }>) => {
+    if (pts.length === 0) return;
+    const computed = calculateBounds(pts, { extraZoom: COMPACT_FIT_ZOOM_BUMP });
+    clearPanTransform();
+    setCenter(defaultCenter ?? computed.center);
+    setZoom(clampZoom(computed.zoom));
+  }, [defaultCenter, clearPanTransform, clampZoom]);
+
+  // Timeline-to-map locate: center on the stop, zoom untouched. Nonce-keyed
+  // so both instances consume the same request idempotently; retries every
+  // render until the point exists (points may still be loading).
+  const [locateNonceSeen, setLocateNonceSeen] = useState<number | null>(null);
+  if (locateRequest && locateRequest.nonce !== locateNonceSeen) {
+    const hit = points.find((p) =>
+      p.place.id === locateRequest.placeId ||
+      (p.place as PlannerScheduledPlace).place_id === locateRequest.placeId ||
+      (p.place as PlannerScheduledPlace).visit_id === locateRequest.placeId,
+    );
+    if (hit) {
+      setLocateNonceSeen(locateRequest.nonce);
+      setCenter({ lat: hit.lat, lng: hit.lng });
+    }
+  }
+
+  // Fit bounds helper on user button click (schedule only; pool visibility
+  // never affects the viewport).
+  const fitBounds = useCallback(() => {
+    fitToPoints(scheduleFitBasis);
+  }, [scheduleFitBasis, fitToPoints]);
+
+  // Jump back to the active day: default layers, its route, fit its stops.
+  const backToActiveDay = useCallback(() => {
+    resetLayers();
+    const dayPoints = points.filter((p) => p.isScheduled && p.isActiveDay !== false);
+    const scheduled = points.filter((p) => p.isScheduled);
+    const target = dayPoints.length > 0 ? dayPoints : scheduled.length > 0 ? scheduled : points;
+    if (target.length === 0) return;
+    fitToPoints(target);
+  }, [resetLayers, points, fitToPoints]);
+
+  // Pan & pinch interaction (pointer events cover mouse, touch and pen)
+  const activePointers = useRef(new Map<number, { x: number; y: number }>());
+  const dragStartRef = useRef<{ x: number; y: number; center: { lat: number; lng: number } } | null>(null);
+  const pinchRef = useRef<{
+    startDistance: number;
+    startZoom: number;
+    midX: number;
+    midY: number;
+    geo: { lat: number; lng: number };
+  } | null>(null);
+  const lastPinchEndRef = useRef(0);
+
+  const viewRef = useRef({ center, zoom });
+  useEffect(() => {
+    viewRef.current = { center, zoom };
+  }, [center, zoom]);
+
+  // Auto-fit only when necessary so user panning is never yanked away:
+  // first load, active day change, or new schedule points outside view. Layer
+  // toggles never refit (see needFit below); the candidate pool in particular
+  // is display-only and excluded from both the check and the fit target.
+  const lastPointsCountRef = useRef<number>(0);
+  const lastActiveDayRef = useRef<number>(activeDayIndex);
+  const lastLayerSigRef = useRef<string>(layerSig);
+
+  useEffect(() => {
+    if (points.length === 0) return;
+    if (skipInitialFitRef.current) {
+      skipInitialFitRef.current = false;
+      lastPointsCountRef.current = points.length;
+      lastActiveDayRef.current = activeDayIndex;
+      lastLayerSigRef.current = layerSig;
+      return;
+    }
+    const dayChanged = lastActiveDayRef.current !== activeDayIndex;
+    const layerChanged = lastLayerSigRef.current !== layerSig;
+    const pointsAppeared = lastPointsCountRef.current === 0 && points.length > 0;
+
+    // Day changes refit; layer toggles never yank the viewport — newly
+    // revealed far schedule points are pulled in by the out-of-view check
+    // below (pool points never trigger it).
+    let needFit = pointsAppeared || dayChanged;
+    if (!needFit && (points.length !== lastPointsCountRef.current || layerChanged)) {
+      const width = containerSize.width || 400;
+      const height = containerSize.height || 300;
+      const cx = projectLngToX(center.lng, zoom);
+      const cy = projectLatToY(center.lat, zoom);
+      needFit = scheduleFitBasis.some((p) => {
+        const x = projectLngToX(p.lng, zoom) - cx + width / 2;
+        const y = projectLatToY(p.lat, zoom) - cy + height / 2;
+        return x < -20 || x > width + 20 || y < -20 || y > height + 20;
+      });
+    }
+
+    if (needFit) {
+      fitToPoints(scheduleFitBasis);
+    }
+
+    lastPointsCountRef.current = points.length;
+    lastActiveDayRef.current = activeDayIndex;
+    lastLayerSigRef.current = layerSig;
+  }, [points, activeDayIndex, layerSig, showRoutesLayer, center, zoom, containerSize, scheduleFitBasis, fitToPoints]);
+  const screenToGeo = useCallback((sx: number, sy: number) => {
+    const { width, height } = viewportSize();
+    const view = viewRef.current;
+    const scale = Math.pow(2, view.zoom) * 256;
+    const wx = projectLngToX(view.center.lng, view.zoom) - width / 2 + sx;
+    const wy = projectLatToY(view.center.lat, view.zoom) - height / 2 + sy;
+    const latRad = Math.atan(Math.sinh(Math.PI * (1 - (2 * wy) / scale)));
+    return {
+      lng: Math.max(-180, Math.min(180, (wx / scale) * 360 - 180)),
+      lat: Math.max(-85, Math.min(85, (latRad * 180) / Math.PI)),
+    };
+  }, [viewportSize]);
+
+  // Center required so that `geo` stays under screen point (sx, sy) at zoomTo.
+  const centerForAnchor = useCallback((geo: { lat: number; lng: number }, zoomTo: number, sx: number, sy: number) => {
+    const { width, height } = viewportSize();
+    const nextScale = Math.pow(2, zoomTo) * 256;
+    const cwX = ((geo.lng + 180) / 360) * nextScale - sx + width / 2;
+    const cwY = projectLatToY(geo.lat, zoomTo) - sy + height / 2;
+    const latRad = Math.atan(Math.sinh(Math.PI * (1 - (2 * cwY) / nextScale)));
+    return {
+      lng: Math.max(-180, Math.min(180, (cwX / nextScale) * 360 - 180)),
+      lat: Math.max(-85, Math.min(85, (latRad * 180) / Math.PI)),
+    };
+  }, [viewportSize]);
+
+  // Keep the geographic point under (sx, sy) stationary while changing zoom.
+  const applyZoomAround = useCallback((targetZoom: number, sx: number, sy: number) => {
+    const zoomTo = clampZoom(targetZoom);
+    if (zoomTo === viewRef.current.zoom) return;
+    clearPanTransform();
+    setCenter(centerForAnchor(screenToGeo(sx, sy), zoomTo, sx, sy));
+    setZoom(zoomTo);
+  }, [centerForAnchor, clampZoom, screenToGeo, clearPanTransform]);
+
+  // Button zoom glides (~200ms ease-out); wheel/pinch stay instant and cancel a glide.
+  const zoomGlideRef = useRef<number>(0);
+  const cancelZoomGlide = useCallback(() => {
+    if (zoomGlideRef.current) {
+      cancelAnimationFrame(zoomGlideRef.current);
+      zoomGlideRef.current = 0;
+    }
+  }, []);
+  // Coalesced view updates (pinch): latest event wins, at most one setState per frame.
+  const viewRafRef = useRef<number>(0);
+  const pendingViewFrameRef = useRef<(() => void) | null>(null);
+  const scheduleViewFrame = useCallback((frame: () => void) => {
+    pendingViewFrameRef.current = frame;
+    if (!viewRafRef.current) {
+      viewRafRef.current = window.requestAnimationFrame(() => {
+        viewRafRef.current = 0;
+        const run = pendingViewFrameRef.current;
+        pendingViewFrameRef.current = null;
+        run?.();
+      });
+    }
+  }, []);
+  useEffect(() => () => {
+    cancelZoomGlide();
+    if (viewRafRef.current) cancelAnimationFrame(viewRafRef.current);
+  }, [cancelZoomGlide]);
+  const animateZoomAround = useCallback((targetZoom: number, sx: number, sy: number) => {
+    cancelZoomGlide();
+    const fromZoom = viewRef.current.zoom;
+    const zoomTo = clampZoom(targetZoom);
+    if (zoomTo === fromZoom) return;
+    const geo = screenToGeo(sx, sy);
+    const start = performance.now();
+    const durationMs = 200;
+    const step = (now: number) => {
+      const t = Math.min(1, (now - start) / durationMs);
+      const eased = 1 - Math.pow(1 - t, 3);
+      const z = fromZoom + (zoomTo - fromZoom) * eased;
+      setCenter(centerForAnchor(geo, z, sx, sy));
+      setZoom(z);
+      zoomGlideRef.current = t < 1 ? window.requestAnimationFrame(step) : 0;
+    };
+    zoomGlideRef.current = window.requestAnimationFrame(step);
+  }, [cancelZoomGlide, clampZoom, screenToGeo, centerForAnchor]);
+
+  const pointerDownPosRef = useRef<{ x: number; y: number } | null>(null);
+
+  const handlePointerDown = (e: React.PointerEvent) => {
+    if (e.button !== 0 && e.pointerType === 'mouse') return;
+    cancelZoomGlide();
+    clearPanTransform();
+    const rect = containerRef.current?.getBoundingClientRect();
+    const point = { x: e.clientX - (rect?.left ?? 0), y: e.clientY - (rect?.top ?? 0) };
+    pointerDownPosRef.current = { x: e.clientX, y: e.clientY };
+    activePointers.current.set(e.pointerId, point);
+    // Do not steal pointer capture from markers / interactive controls:
+    // capturing to the container retargets pointerup and breaks child onClick,
+    // so the popover intermittently fails to open (especially on double-click).
+    const target = e.target as HTMLElement | null;
+    const isInteractiveTarget = !!target?.closest?.('[data-map-marker],button,a,select,input,textarea');
+    if (!isInteractiveTarget) {
+      try {
+        containerRef.current?.setPointerCapture(e.pointerId);
+      } catch { /* best-effort; failure is non-fatal */ }
+    }
+
+    if (activePointers.current.size === 2) {
+      dragStartRef.current = null;
+      const [a, b] = [...activePointers.current.values()];
+      const midX = (a.x + b.x) / 2;
+      const midY = (a.y + b.y) / 2;
+      pinchRef.current = {
+        startDistance: Math.max(8, Math.hypot(a.x - b.x, a.y - b.y)),
+        startZoom: viewRef.current.zoom,
+        midX,
+        midY,
+        geo: screenToGeo(midX, midY),
+      };
+    } else if (activePointers.current.size === 1) {
+      setIsDragging(true);
+      dragStartRef.current = { x: e.clientX, y: e.clientY, center: { ...viewRef.current.center } };
+    }
+  };
+
+  const handlePointerMove = (e: React.PointerEvent) => {
+    if (!activePointers.current.has(e.pointerId)) return;
+    const rect = containerRef.current?.getBoundingClientRect();
+    activePointers.current.set(e.pointerId, { x: e.clientX - (rect?.left ?? 0), y: e.clientY - (rect?.top ?? 0) });
+
+    if (pinchRef.current && activePointers.current.size >= 2) {
+      const [a, b] = [...activePointers.current.values()];
+      const distance = Math.max(8, Math.hypot(a.x - b.x, a.y - b.y));
+      const midX = (a.x + b.x) / 2;
+      const midY = (a.y + b.y) / 2;
+      const pinch = pinchRef.current;
+      const zoomTo = clampZoom(pinch.startZoom + Math.log2(distance / pinch.startDistance));
+      const geo = pinch.geo;
+      scheduleViewFrame(() => {
+        setCenter(centerForAnchor(geo, zoomTo, midX, midY));
+        setZoom(zoomTo);
+      });
+      return;
+    }
+
+    // Pan: translate tiles + routes imperatively (no state churn, markers frozen).
+    // The geographic commit happens once on pointerup.
+    if (!isDragging || !dragStartRef.current) return;
+    const dx = e.clientX - dragStartRef.current.x;
+    const dy = e.clientY - dragStartRef.current.y;
+    panOffsetRef.current = { dx, dy };
+    applyPanTransform(dx, dy);
+  };
+
+  const handlePointerUp = (e: React.PointerEvent) => {
+    activePointers.current.delete(e.pointerId);
+    if (pinchRef.current && activePointers.current.size < 2) {
+      pinchRef.current = null;
+      lastPinchEndRef.current = Date.now();
+    }
+    // Commit a finished pan exactly once, then snap markers/routes to geography.
+    const panOffset = panOffsetRef.current;
+    clearPanTransform();
+    if (panOffset && (panOffset.dx !== 0 || panOffset.dy !== 0) && dragStartRef.current) {
+      const startX = projectLngToX(dragStartRef.current.center.lng, zoom);
+      const startY = projectLatToY(dragStartRef.current.center.lat, zoom);
+      const scale = Math.pow(2, zoom) * 256;
+      const newX = startX - panOffset.dx;
+      const newY = startY - panOffset.dy;
+      const newLng = (newX / scale) * 360 - 180;
+      const newLatRad = Math.atan(Math.sinh(Math.PI * (1 - (2 * newY) / scale)));
+      setCenter({
+        lat: Math.max(-85, Math.min(85, (newLatRad * 180) / Math.PI)),
+        lng: Math.max(-180, Math.min(180, newLng)),
+      });
+    }
+    const remaining = [...activePointers.current.values()][0];
+    if (remaining) {
+      setIsDragging(true);
+      const rect = containerRef.current?.getBoundingClientRect();
+      dragStartRef.current = {
+        x: remaining.x + (rect?.left ?? 0),
+        y: remaining.y + (rect?.top ?? 0),
+        center: { ...viewRef.current.center },
+      };
+    } else {
+      if (pointerDownPosRef.current) {
+        const dist = Math.hypot(e.clientX - pointerDownPosRef.current.x, e.clientY - pointerDownPosRef.current.y);
+        if (dist < 6 && (e.target === containerRef.current || (e.target as HTMLElement).tagName === 'IMG' || (e.target as HTMLElement).tagName === 'svg' || (e.target as HTMLElement).tagName === 'polyline')) {
+          setSelectedPlaceId(null);
+          setOpenClusterKey(null);
+        }
+      }
+      setIsDragging(false);
+      dragStartRef.current = null;
+    }
+  };
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const onWheelNative = (event: WheelEvent) => {
+      event.preventDefault();
+      cancelZoomGlide();
+      const rect = el.getBoundingClientRect();
+      const sx = event.clientX - rect.left;
+      const sy = event.clientY - rect.top;
+      const step = event.deltaY < 0 ? ZOOM_STEP_WHEEL : -ZOOM_STEP_WHEEL;
+      window.requestAnimationFrame(() => applyZoomAround(viewRef.current.zoom + step, sx, sy));
+    };
+    el.addEventListener('wheel', onWheelNative, { passive: false });
+    return () => el.removeEventListener('wheel', onWheelNative);
+  }, [applyZoomAround, cancelZoomGlide]);
+
+  const centerX = projectLngToX(center.lng, zoom);
+  const centerY = projectLatToY(center.lat, zoom);
+
+  // Visible tiles calculation
+  const intZoom = Math.floor(zoom);
+  const tileSize = 256 * Math.pow(2, zoom - intZoom);
+  const numTiles = Math.pow(2, intZoom);
+
+  // One tile of overdraw on every side so frozen pans don't expose blank margins.
+  const startTileX = Math.floor((centerX - containerSize.width / 2) / tileSize) - 1;
+  const endTileX = Math.floor((centerX + containerSize.width / 2) / tileSize) + 1;
+  const startTileY = Math.floor((centerY - containerSize.height / 2) / tileSize) - 1;
+  const endTileY = Math.floor((centerY + containerSize.height / 2) / tileSize) + 1;
+
+  const tiles = useMemo(() => {
+    const result: Array<{ key: string; x: number; y: number; left: number; top: number }> = [];
+    for (let tx = startTileX; tx <= endTileX; tx++) {
+      for (let ty = startTileY; ty <= endTileY; ty++) {
+        const wrappedX = ((tx % numTiles) + numTiles) % numTiles;
+        if (ty >= 0 && ty < numTiles) {
+          const left = tx * tileSize - (centerX - containerSize.width / 2);
+          const top = ty * tileSize - (centerY - containerSize.height / 2);
+          result.push({
+            key: `${intZoom}/${wrappedX}/${ty}`,
+            x: wrappedX,
+            y: ty,
+            left,
+            top,
+          });
+        }
+      }
+    }
+    return result;
+  }, [
+    centerX,
+    centerY,
+    containerSize.height,
+    containerSize.width,
+    endTileX,
+    endTileY,
+    intZoom,
+    numTiles,
+    startTileX,
+    startTileY,
+    tileSize,
+  ]);
+
+  // Layer-resolved display points: active-day base always, other days with
+  // the routes layer, candidates with the pool layer.
+  const visiblePoints = useMemo(() => {
+    return resolveLayerPoints(points, { showRoutesLayer, showCandidates });
+  }, [points, showRoutesLayer, showCandidates]);
+
+  // Every visible point keeps its own identity marker: candidate pools stay
+  // directly plannable and scheduled stops keep their sequence numbers.
+  // Only exact-duplicate coordinates collapse (see markerClusters below);
+  // visual hierarchy otherwise comes from marker size grading.
+  const markerLayout = useMemo(() => {
+    return visiblePoints.map((p, index) => {
+      const x = projectLngToX(p.lng, zoom) - centerX + containerSize.width / 2;
+      const y = projectLatToY(p.lat, zoom) - centerY + containerSize.height / 2;
+      return { p, index, x, y };
+    }).filter(
+      (item) => item.x >= -40 && item.x <= containerSize.width + 40 && item.y >= -40 && item.y <= containerSize.height + 40,
+    );
+  }, [visiblePoints, zoom, centerX, centerY, containerSize]);
+
+  // Exact-duplicate coordinates (≈1m) collapse into one cluster marker with a
+  // count badge — e.g. the same café scheduled twice a day, or the same hotel
+  // on two days. Grouping is coordinate-only so every stacked place stays
+  // reachable; the member list badges (D2·3 / 候选） tell kinds apart.
+  // Positions are render-loop positions (post viewport-cull), matching the
+  // pIdx used at render below.
+  const markerClusters = useMemo(() => {
+    return clusterMarkersByCoordinates(
+      markerLayout.map((item) => ({
+        lat: item.p.lat,
+        lng: item.p.lng,
+        isScheduled: item.p.isScheduled,
+        // NOTE: compare canonicalPlaceId, not place.id — scheduled occurrences
+        // carry the visit id in place.id.
+        canonicalPlaceId: canonicalPlaceId(item.p.place),
+      })),
+    );
+  }, [markerLayout]);
+
+  // Scheduled route points for line rendering (active day)
+  const scheduledRoutePoints = useMemo(() => {
+    return points
+      .filter((p) => p.isScheduled && p.isActiveDay !== false)
+      .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+      .map((p) => {
+        const x = projectLngToX(p.lng, zoom) - centerX + containerSize.width / 2;
+        const y = projectLatToY(p.lat, zoom) - centerY + containerSize.height / 2;
+        return { ...p, x, y };
+      });
+  }, [points, zoom, centerX, centerY, containerSize.width, containerSize.height]);
+
+
+
+  // Multi-day route polylines for line rendering
+  const allDaysRoutes = useMemo(() => {
+    if (!allPlacesByDate || !tripDates || tripDates.length === 0) return [];
+
+    return tripDates
+      .map((date, dIdx) => {
+        const dayPlaces = allPlacesByDate[date] || [];
+        const isActiveDay = date === activeDate || dIdx === activeDayIndex;
+        const screenPoints: Array<{ x: number; y: number; place: PlannerScheduledPlace; order: number }> = [];
+
+        dayPlaces.forEach((place, index) => {
+          const coords = extractPlaceCoordinates(place);
+          if (coords) {
+            const x = projectLngToX(coords.lng, zoom) - centerX + containerSize.width / 2;
+            const y = projectLatToY(coords.lat, zoom) - centerY + containerSize.height / 2;
+            screenPoints.push({ x, y, place, order: index + 1 });
+          }
+        });
+
+        return {
+          date,
+          dayIndex: dIdx,
+          isActiveDay,
+          screenPoints,
+        };
+      })
+      .filter((r) => r.screenPoints.length >= 2);
+  }, [allPlacesByDate, tripDates, activeDate, activeDayIndex, zoom, centerX, centerY, containerSize.width, containerSize.height]);
+
+  // The route actually drawn (and badged) is always the active day's:
+  // other days render as layer polylines below, never badged.
+  const activeRoutePts = useMemo(() => {
+    return scheduledRoutePoints.map((p) => ({
+      placeId: (p.place as PlannerScheduledPlace).place_id ?? p.place.id,
+      x: p.x,
+      y: p.y,
+    }));
+  }, [scheduledRoutePoints]);
+
+  const routeDayColor = plannerDayColor(activeDayIndex);
+
+  // Per-segment polylines for the drawn route, dashed by each leg's mode.
+  const activeRouteSegments = useMemo(() => {
+    const segments: Array<{ key: string; x1: number; y1: number; x2: number; y2: number; dash?: string }> = [];
+    for (let index = 0; index + 1 < activeRoutePts.length; index += 1) {
+      const from = activeRoutePts[index];
+      const to = activeRoutePts[index + 1];
+      const leg = tripId && legByPair ? legByPair.get(plannerTripLegId(tripId, from.placeId, to.placeId)) : undefined;
+      segments.push({
+        // Index-scoped: the same place pair may repeat within one day.
+        key: `${index}:${from.placeId}→${to.placeId}`,
+        x1: from.x, y1: from.y, x2: to.x, y2: to.y,
+        dash: routeDashForMode(leg?.mode),
+      });
+    }
+    return segments;
+  }, [activeRoutePts, legByPair, tripId]);
+
+  // Time pills at drawn-route segment midpoints, sourced from the same persisted
+  // legs the timeline uses. Overlap is tested against scheduled markers only:
+  // tiny candidate dots may sit under a pill, but a numbered stop must stay readable.
+  const segmentBadges = useMemo(() => {
+    if (!legByPair || !tripId || activeRoutePts.length < 2) return [];
+    const markers = markerLayout
+      .filter((item) => item.p.isScheduled)
+      .map((item) => ({
+        x: item.x,
+        y: item.y,
+        radius: item.p.isActiveDay === false ? (compact ? 10 : 12) : (compact ? 12 : 16),
+      }));
+    return buildSegmentBadges(
+      activeRoutePts,
+      legByPair,
+      tripId,
+      markers,
+      { zh },
+    );
+  }, [activeRoutePts, legByPair, tripId, markerLayout, compact, zh]);
+
+  // White flow dots marching along the drawn route (direction cue).
+  // Pure CSS animation, disabled under prefers-reduced-motion.
+  const flowDots = useMemo(() => activeRouteSegments.map((seg) => (
+    <polyline
+      key={`flow-${seg.key}`}
+      points={`${seg.x1},${seg.y1} ${seg.x2},${seg.y2}`}
+      fill="none"
+      stroke="#ffffff"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeDasharray="0.5 10"
+      className="ownly-route-flow"
+      opacity="0.9"
+    />
+  )), [activeRouteSegments]);
+
+  const selectedPoint = useMemo(() => points.find((point) => point.place.id === selectedPlaceId) ?? null, [points, selectedPlaceId]);
+  const selectedPlace = selectedPoint?.place ?? null;
+  const selectedScheduledPlace = useMemo(() => {
+    if (!selectedPoint?.isScheduled) return null;
+    if (selectedPoint.isActiveDay === false) return null;
+    return selectedPoint.place as PlannerScheduledPlace;
+  }, [selectedPoint]);
+  // Full numbered-stop count of the active day (dedup-free: a place scheduled
+  // twice occupies two numbers). Drives the insert-at-position picker.
+  const activeDayStopCount = activeDate && allPlacesByDate?.[activeDate]
+    ? allPlacesByDate[activeDate].length
+    : scheduledPlaces.length;
+
+  const selectedPointScreen = useMemo(() => {
+    if (!selectedPoint) return null;
+    const x = projectLngToX(selectedPoint.lng, zoom) - centerX + containerSize.width / 2;
+    const y = projectLatToY(selectedPoint.lat, zoom) - centerY + containerSize.height / 2;
+    return { x, y };
+  }, [selectedPoint, zoom, centerX, centerY, containerSize.width, containerSize.height]);
+
+  // Scale bar: pick the largest 1/2/5-step distance fitting ~80px.
+  const scaleBar = useMemo(() => {
+    const metersPerPixel = (156543.03392 * Math.cos((center.lat * Math.PI) / 180)) / Math.pow(2, zoom);
+    if (!Number.isFinite(metersPerPixel) || metersPerPixel <= 0) return null;
+    const raw = metersPerPixel * 80;
+    const exp = Math.floor(Math.log10(raw));
+    const base = raw / Math.pow(10, exp);
+    const niceBase = base >= 5 ? 5 : base >= 2 ? 2 : 1;
+    const distance = niceBase * Math.pow(10, exp);
+    return {
+      widthPx: Math.round(distance / metersPerPixel),
+      label: distance >= 1000 ? `${distance / 1000} km` : `${distance} m`,
+    };
+  }, [center.lat, zoom]);
+
+  return (
+    <div className="flex h-full flex-col overflow-hidden rounded-xl border border-stone-200 bg-white shadow-xs">
+      {/* Map Controls: one segmented layer switch shared by both variants
+          (compact/full differ only in marker sizes below). Segments:
+          当天 = solo active day (click again to restore defaults),
+          路线 = overlay other days' routes, 候选池 = pool overlay with count. */}
+      <div className="flex flex-wrap items-center justify-end gap-1.5 border-b border-stone-100 bg-stone-50/80 px-3 py-2">
+        <div
+          role="group"
+          aria-label={zh ? '地图图层' : 'Map layers'}
+          className="flex items-center overflow-hidden rounded-full text-[10px] font-semibold ring-1 ring-stone-200"
+        >
+          <button
+            type="button"
+            onClick={() => {
+              if (!showRoutesLayer && !showCandidates) resetLayers();
+              else { setShowRoutesLayer(false); setShowCandidates(false); setColoredDays([]); }
+            }}
+            aria-pressed={!showRoutesLayer && !showCandidates}
+            title={zh ? '只看当天（再点一次恢复默认）' : 'Active day only (click again to restore)'}
+            className={`px-2 py-0.5 transition ${!showRoutesLayer && !showCandidates ? 'bg-emerald-700 text-white' : 'bg-white text-stone-600 hover:bg-stone-100'}`}
+          >
+            🟢 {zh ? `第${activeDayIndex + 1}天` : `Day ${activeDayIndex + 1}`}
+          </button>
+          {allPlacesByDate && tripDates && tripDates.length > 1 ? (
+            <button
+              type="button"
+              onClick={() => setShowRoutesLayer((prev) => !prev)}
+              title={zh ? '叠加其它天的路线（灰色，可到图例点亮某天）' : 'Overlay other days’ routes (gray until lit in the legend)'}
+              aria-pressed={showRoutesLayer}
+              className={`px-2 py-0.5 transition ${showRoutesLayer ? 'bg-indigo-700 text-white' : 'bg-white text-stone-600 hover:bg-stone-100'}`}
+            >
+              🌐 {zh ? '路线' : 'Routes'}
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => setShowCandidates((prev) => !prev)}
+            title={zh ? '候选池：只显示或隐藏，不影响地图视野' : 'Candidate pool: show or hide only, never moves the view'}
+            aria-pressed={showCandidates}
+            className={`px-2 py-0.5 transition ${showCandidates ? 'bg-blue-700 text-white' : 'bg-white text-stone-600 hover:bg-stone-100'}`}
+          >
+            🔵 {zh ? '候选池' : 'Pool'} ({candidatePlaces.length})
+          </button>
+        </div>
+        <div className="relative">
+          <button
+            type="button"
+            onClick={() => setControlsMenuOpen((prev) => !prev)}
+            className="rounded-full bg-white px-2 py-0.5 text-[10px] font-bold text-stone-600 ring-1 ring-stone-200 hover:bg-stone-100 transition"
+            title={zh ? '底图样式' : 'Basemap style'}
+            aria-expanded={controlsMenuOpen}
+          >
+            ⋯
+          </button>
+          {controlsMenuOpen ? (
+            <>
+              <div className="fixed inset-0 z-40 cursor-default" onClick={() => setControlsMenuOpen(false)} />
+              <div className="absolute right-0 z-50 mt-1 w-44 overflow-hidden rounded-lg border border-stone-200 bg-white py-1 shadow-xl">
+                <div className="px-3 py-1.5">
+                  <div className="mb-1 text-[9px] font-bold text-stone-500">{zh ? '底图' : 'Basemap'}</div>
+                  <select
+                    value={basemapStyle}
+                    onChange={(e) => handleBasemapChange(e.target.value as BasemapStyle)}
+                    className="w-full rounded-md border border-stone-200 bg-white px-1.5 py-1 text-[10px] font-semibold text-stone-700 focus:border-stone-400 focus:outline-hidden cursor-pointer"
+                  >
+                    {BASEMAP_OPTIONS.map((opt) => (
+                      <option key={opt.id} value={opt.id}>
+                        {opt.icon} {opt.label[language]}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            </>
+          ) : null}
+        </div>
+      </div>
+
+      {/* Map Viewport Area */}
+      <div
+        ref={containerRef}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerLeave={handlePointerUp}
+        className="relative flex-1 cursor-grab overflow-hidden select-none active:cursor-grabbing"
+        style={{ minHeight: '300px', background: activeBasemap.bgColor, touchAction: 'none' }}
+      >
+        {/* Dynamic Basemap Tiles (translated imperatively during pans) */}
+        <div ref={tilesWrapRef} className="absolute inset-0 pointer-events-none">
+          {tiles.map((t) => (
+            // eslint-disable-next-line @next/next/no-img-element -- basemap tiles are remote map image URLs, not optimizable local assets
+            <img
+              key={`${basemapStyle}/${t.key}`}
+              src={activeBasemap.getUrl(intZoom, t.x, t.y)}
+              alt=""
+              draggable={false}
+              decoding="async"
+              referrerPolicy="no-referrer"
+              className="absolute"
+              style={{
+                left: `${t.left}px`,
+                top: `${t.top}px`,
+                width: `${tileSize}px`,
+                height: `${tileSize}px`,
+              }}
+              // No loading="lazy": tiles are already viewport-clipped (+1 ring)
+              // and lazy would demote them to Lowest priority (checkerboarding on pan/zoom).
+              onError={(e) => {
+                const img = e.target as HTMLImageElement;
+                if (img.dataset.fallback || !activeBasemap.fallbackUrl) return;
+                img.dataset.fallback = '1';
+                img.src = activeBasemap.fallbackUrl(intZoom, t.x, t.y);
+              }}
+            />
+          ))}
+        </div>
+
+        {/* Connecting Polyline Route SVG overlay (translated imperatively during pans).
+            The active day always draws in its color with per-segment
+            transport-mode dashes; the routes layer adds other days below it,
+            light gray unless lit in the legend. */}
+        <div ref={routesWrapRef} className="absolute inset-0 pointer-events-none">
+        {(activeRouteSegments.length > 0 || showRoutesLayer) ? (
+          <svg className="pointer-events-none absolute inset-0 h-full w-full">
+            {/* Other-days layer */}
+            {showRoutesLayer
+              ? allDaysRoutes
+                .filter((r) => !r.isActiveDay)
+                .map((r) => {
+                  const stroke = routeStrokeForDay(
+                    r.dayIndex,
+                    activeDayIndex,
+                    { showRoutesLayer, showCandidates, coloredDays },
+                    plannerDayColor(r.dayIndex),
+                  );
+                  if (!stroke) return null;
+                  return (
+                    <polyline
+                      key={r.date}
+                      points={r.screenPoints.map((p) => `${p.x},${p.y}`).join(' ')}
+                      fill="none"
+                      stroke={stroke.stroke}
+                      strokeWidth={stroke.strokeWidth}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      opacity={stroke.opacity}
+                    />
+                  );
+                })
+              : null}
+
+            {/* Active-day route on top */}
+            {activeRouteSegments.map((seg) => (
+              <polyline
+                key={seg.key}
+                points={`${seg.x1},${seg.y1} ${seg.x2},${seg.y2}`}
+                fill="none"
+                stroke={routeDayColor}
+                strokeWidth="3.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeDasharray={seg.dash}
+                opacity="0.95"
+              />
+            ))}
+            {flowDots}
+          </svg>
+        ) : null}
+        </div>
+
+        {/* Segment time pills (active route, below markers, never intercepting taps) */}
+        {segmentBadges.map((badge) => (
+          <div
+            key={badge.key}
+            className="pointer-events-none absolute -translate-x-1/2 -translate-y-1/2 whitespace-nowrap rounded-full border bg-white/95 px-1.5 text-[9.5px] font-semibold text-stone-600 shadow-xs"
+            style={{ left: `${badge.x}px`, top: `${badge.y}px`, borderColor: `${routeDayColor}88`, zIndex: 10 }}
+            title={zh ? '与时间线一致的行程段耗时' : 'Matches the timeline leg duration'}
+          >
+            {badge.text}
+          </div>
+        ))}
+
+        {/* POI Markers */}
+        {markerLayout.map(({ p, x, y }, pIdx) => {
+          const clusterPos = markerClusters.get(pIdx);
+          if (clusterPos && clusterPos[0] !== pIdx) return null;
+          if (clusterPos && clusterPos.length > 1) {
+            const items = clusterPos.map((pos) => markerLayout[pos]);
+            const first = items[0];
+            const clusterKey = `cluster_${first.p.lat.toFixed(5)}_${first.p.lng.toFixed(5)}`;
+            const isOpen = openClusterKey === clusterKey;
+            const anyScheduled = items.some((item) => item.p.isScheduled);
+            const lit = items.some((item) =>
+              highlightedPlaceId === item.p.place.id || selectedPlaceId === item.p.place.id,
+            );
+            const names = items.map((item) => item.p.place.title).join('、');
+            const openList = () => {
+              setSelectedPlaceId(null);
+              setOpenClusterKey(isOpen ? null : clusterKey);
+            };
+            const zoomHere = () => {
+              clearPanTransform();
+              setCenter({ lat: first.p.lat, lng: first.p.lng });
+              const { width, height } = viewportSize();
+              animateZoomAround(viewRef.current.zoom + 1, width / 2, height / 2);
+            };
+            return (
+              <Fragment key={clusterKey}>
+                <div
+                  data-map-marker="true"
+                  data-marker-id={first.p.place.id}
+                  role="button"
+                  tabIndex={0}
+                  aria-label={zh ? `${items.length} 个地点在此：${names}（点击展开列表）` : `${items.length} places here (click to expand)`}
+                  title={zh ? `${names}（点击展开列表）` : `${names} (click to expand)`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    openList();
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      openList();
+                    }
+                  }}
+                  className={`absolute z-30 flex touch-manipulation ${compact ? 'h-5 min-w-5 px-0.5 text-[10px]' : 'h-7 min-w-7 text-[11px]'} -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full font-black text-white shadow-md transition hover:scale-110 ${anyScheduled ? 'bg-emerald-700 ring-2 ring-emerald-300' : 'bg-stone-800 ring-2 ring-white'} ${lit || isOpen ? 'outline-2 outline-amber-400' : ''}`}
+                  style={{ left: `${x}px`, top: `${y}px` }}
+                >
+                  {items.length}
+                </div>
+                {isOpen ? (
+                  <div
+                    className="absolute z-50 w-max rounded-xl border border-stone-200/95 bg-white/95 p-1.5 shadow-xl backdrop-blur-md ownly-pop-in"
+                    style={{
+                      left: `${Math.max(90, Math.min(containerSize.width - 90, x))}px`,
+                      top: `${y + 18}px`,
+                      transform: 'translate(-50%, 0)',
+                      maxWidth: `${Math.max(180, Math.min(280, containerSize.width - 24))}px`,
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    role="listbox"
+                    aria-label={zh ? '同坐标地点列表' : 'Places at this location'}
+                  >
+                    <button
+                      type="button"
+                      onClick={zoomHere}
+                      className="flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-[11px] font-bold text-stone-600 transition hover:bg-stone-100"
+                    >
+                      🔍 {zh ? '放大看分布' : 'Zoom in'}
+                    </button>
+                    <div className="my-1 h-px bg-stone-100" aria-hidden />
+                    <div className="max-h-44 overflow-y-auto">
+                      {items.map((item) => (
+                        <button
+                          key={item.p.isScheduled ? `sched_${item.p.place.id}_${item.p.dayIndex ?? ''}` : `cand_${item.p.place.id}`}
+                          type="button"
+                          role="option"
+                          aria-selected={selectedPlaceId === item.p.place.id}
+                          onClick={() => {
+                            setOpenClusterKey(null);
+                            setSelectedPlaceId(item.p.place.id);
+                          }}
+                          onMouseEnter={() => onHoverPlace?.(item.p.place.id)}
+                          onMouseLeave={() => onHoverPlace?.(null)}
+                          className="flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-left text-[11px] transition hover:bg-emerald-50"
+                          title={item.p.place.title}
+                        >
+                          <span className="shrink-0">{KIND_EMOJI[item.p.place.kind] || '📍'}</span>
+                          <span className="min-w-0 flex-1 truncate font-semibold text-stone-800">{item.p.place.title}</span>
+                          {item.p.isScheduled ? (
+                            <span
+                              className="shrink-0 rounded-full px-1.5 text-[9px] font-bold text-white"
+                              style={{ backgroundColor: plannerDayColor(item.p.dayIndex ?? activeDayIndex) }}
+                            >
+                              D{(item.p.dayIndex ?? 0) + 1}·{item.p.order}
+                            </span>
+                          ) : (
+                            <span className="shrink-0 rounded-full bg-blue-100 px-1.5 text-[9px] font-bold text-blue-800">
+                              {zh ? '候选' : 'Pool'}
+                            </span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </Fragment>
+            );
+          }
+          const isHighlighted = highlightedPlaceId === p.place.id || selectedPlaceId === p.place.id;
+          const isOtherDayStop = p.isScheduled && p.isActiveDay === false;
+          const dayColor = plannerDayColor(p.dayIndex ?? activeDayIndex);
+          // Legend-lit days render full-color; other visible days recede to neutral gray.
+          const dayLit = isDayLit(p.dayIndex, activeDayIndex, { coloredDays });
+          const grayedOut = showRoutesLayer && isOtherDayStop && !dayLit;
+          // Candidates already scheduled on some day get a light-green marker to stand out from plain white ones.
+          const scheduledCount = visitCountByPlaceId?.get(canonicalPlaceId(p.place)) ?? 0;
+
+          return (
+            <div
+              // Stable across reorder/insert: visit ids are unique per
+              // occurrence (candidates keep index as tiebreak).
+              key={p.isScheduled ? `sched_${p.place.id}_${p.dayIndex ?? ''}` : `cand_${p.place.id}_${pIdx}`}
+              data-map-marker="true"
+              role="button"
+              tabIndex={0}
+              aria-label={markerTitle(p.place.title, p.place.why)}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (Date.now() - lastPinchEndRef.current < 350) return;
+                setSelectedPlaceId(p.place.id);
+              }}
+              onDoubleClick={(e) => {
+                e.stopPropagation();
+                setSelectedPlaceId(p.place.id);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setSelectedPlaceId(p.place.id);
+                } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                  // Up/Down moves focus between markers. Left/Right are left
+                  // to bubble so the planner day switcher (←/→, [ ]) can
+                  // change Day1/Day2/Day3 even when a marker is focused.
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const ids = markerLayout.map((item) => item.p.place.id);
+                  const current = ids.indexOf(p.place.id);
+                  if (current < 0) return;
+                  const delta = e.key === 'ArrowDown' ? 1 : -1;
+                  const next = ids[(current + delta + ids.length) % ids.length];
+                  setSelectedPlaceId(next);
+                  window.document.querySelector<HTMLElement>(`[data-marker-id="${next}"]`)?.focus();
+                }
+              }}
+              data-marker-id={p.place.id}
+              onMouseEnter={() => onHoverPlace?.(p.place.id)}
+              onMouseLeave={() => onHoverPlace?.(null)}
+              className="absolute -translate-x-1/2 -translate-y-1/2 cursor-pointer transition-transform duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-stone-900"
+              style={{
+                left: `${x}px`,
+                top: `${y}px`,
+                zIndex: isHighlighted ? 40 : p.isScheduled ? (p.isActiveDay !== false ? 30 : 25) : 20,
+                // Independent `scale` property (not `transform`) so it composes
+                // with the -translate-1/2 centering instead of overriding it.
+                scale: isHighlighted ? '1.2' : '1',
+              }}
+            >
+              {/* Timeline-hover highlight pulse (motion-safe only) */}
+              {isHighlighted ? (
+                <span
+                  aria-hidden
+                  className="absolute -inset-1 rounded-full opacity-25 motion-safe:animate-ping"
+                  style={{ backgroundColor: dayColor }}
+                />
+              ) : null}
+              {p.isScheduled ? (
+                isOtherDayStop && !dayLit ? (
+                  // Other Day Stop Marker (day identity color, dimmed, one step smaller;
+                  // neutral gray dot when the day is not lit in the legend)
+                  <div
+                    className={`flex ${compact ? 'h-5' : 'h-6'} items-center justify-center rounded-full border border-white/90 px-1.5 shadow-xs text-[9.5px] font-semibold text-white transition-all hover:brightness-110 ${
+                      isHighlighted ? 'ring-2 ring-white scale-110' : ''
+                    }`}
+                    style={{ backgroundColor: grayedOut ? '#a8a29eb3' : `${dayColor}CC` }}
+                    title={markerTitle(`Day ${(p.dayIndex ?? 0) + 1} #${p.order}. ${p.place.title}`, p.place.why)}
+                  >
+                    D{(p.dayIndex ?? 0) + 1}·{p.order}
+                  </div>
+                ) : (
+                  // Numbered Scheduled Marker (day identity color, 32px touch target; 24px compact)
+                  <div
+                    className={`flex ${compact ? 'h-6 w-6 text-[10px]' : 'h-8 w-8 text-xs'} items-center justify-center rounded-full border-2 border-white shadow-md font-bold text-white transition-all`}
+                    style={{
+                      backgroundColor: dayColor,
+                      boxShadow: isHighlighted ? `0 0 0 3px ${dayColor}66, 0 4px 6px -1px rgb(0 0 0 / 0.3)` : undefined,
+                    }}
+                    title={markerTitle(`${p.order}. ${p.place.title}`, p.place.why)}
+                  >
+                    {p.order}
+                  </div>
+                )
+              ) : (
+                // Candidate POI Marker: solid blue dot (white failed on light
+                // basemaps); light green when already scheduled on some day.
+                // Hover/selected restores the full size as feedback.
+                <div
+                  className={`flex ${compact ? 'h-3.5 w-3.5 text-[8px]' : 'h-5 w-5 text-[10px]'} items-center justify-center rounded-full border shadow-sm transition-all ${
+                    scheduledCount > 0
+                      ? `border-emerald-200 bg-emerald-50 ${isHighlighted ? 'ring-3 ring-emerald-400 scale-[1.6]' : 'hover:scale-[1.6]'}`
+                      : `border-white/90 bg-blue-600 ${isHighlighted ? 'ring-3 ring-blue-300 scale-[1.6]' : 'hover:scale-[1.6]'}`
+                  }`}
+                  title={markerTitle(
+                    scheduledCount > 0 ? `${p.place.title} (已排 ${scheduledCount} 次)` : p.place.title,
+                    p.place.why,
+                  )}
+                >
+                  <span className="leading-none">{KIND_EMOJI[p.place.kind] || '📍'}</span>
+                </div>
+              )}
+            </div>
+          );
+        })}
+
+
+
+        {/* Floating Map Action Controls: zoom group, then view group. */}
+        <div className="absolute top-2 right-2 z-30 flex flex-col gap-1.5">
+          <div className="flex flex-col overflow-hidden rounded-md border border-stone-200 bg-white/95 shadow-sm">
+            <button
+              type="button"
+              onClick={() => {
+                const { width, height } = viewportSize();
+                animateZoomAround(viewRef.current.zoom + ZOOM_STEP_BUTTON, width / 2, height / 2);
+              }}
+              className="flex h-7 w-7 items-center justify-center text-xs font-bold text-stone-800 hover:bg-stone-50"
+              title={zh ? '放大' : 'Zoom In'}
+              aria-label={zh ? '放大' : 'Zoom In'}
+            >
+              +
+            </button>
+            <div className="h-px bg-stone-200" aria-hidden />
+            <button
+              type="button"
+              onClick={() => {
+                const { width, height } = viewportSize();
+                animateZoomAround(viewRef.current.zoom - ZOOM_STEP_BUTTON, width / 2, height / 2);
+              }}
+              className="flex h-7 w-7 items-center justify-center text-xs font-bold text-stone-800 hover:bg-stone-50"
+              title={zh ? '缩小' : 'Zoom Out'}
+              aria-label={zh ? '缩小' : 'Zoom Out'}
+            >
+              −
+            </button>
+          </div>
+          <div className="flex flex-col overflow-hidden rounded-md border border-stone-200 bg-white/95 shadow-sm">
+            <button
+              type="button"
+              onClick={fitBounds}
+              className="flex h-7 w-7 items-center justify-center text-xs font-bold text-stone-800 hover:bg-stone-50"
+              title={zh ? '适应日程范围（候选池不影响视野）' : 'Fit schedule (pool does not affect the view)'}
+              aria-label={zh ? '适应日程范围' : 'Fit schedule'}
+            >
+              ⊙
+            </button>
+            {/* Back-to-active-day entry, shared by both variants (the day
+                legend only explains colors and toggles them). */}
+            {tripDates && tripDates.length > 1 ? (
+              <>
+                <div className="h-px bg-stone-200" aria-hidden />
+                <button
+                  type="button"
+                  onClick={backToActiveDay}
+                  className="flex h-7 w-7 items-center justify-center text-[11px] font-bold text-stone-800 hover:bg-stone-50"
+                  title={zh ? '回到当天路线视野' : 'Back to active day view'}
+                  aria-label={zh ? '回到当天路线视野' : 'Back to active day view'}
+                >
+                  ⌖
+                </button>
+              </>
+            ) : null}
+          </div>
+        </div>
+
+        {/* Scale Bar */}
+        {scaleBar ? (
+          <div className="pointer-events-none absolute bottom-2 left-2 z-30 rounded bg-white/95 px-1.5 py-0.5 shadow-sm ring-1 ring-stone-200 backdrop-blur-sm">
+            <div className="text-[9px] font-bold text-stone-700">{scaleBar.label}</div>
+            <div className="border-b-2 border-l-2 border-r-2 border-stone-700" style={{ width: `${scaleBar.widthPx}px`, height: '4px' }} />
+          </div>
+        ) : null}
+
+        {/* Day Color Legend: explains colors and toggles a day's color display.
+            The active day is always lit; lighting another day auto-enables
+            the routes layer so the change is visible. */}
+        {showLegend && tripDates && tripDates.length > 1 ? (
+          <div className="absolute bottom-2 right-2 z-30 rounded-lg bg-white/90 px-2 py-1.5 shadow-xs backdrop-blur-sm">
+            <div className="flex flex-col gap-1">
+              {tripDates.map((date, dIdx) => {
+                const isActive = dIdx === activeDayIndex;
+                const lit = isActive || coloredDays.includes(dIdx);
+                return (
+                  <button
+                    key={date}
+                    type="button"
+                    disabled={isActive}
+                    onClick={() => {
+                      if (!coloredDays.includes(dIdx)) setShowRoutesLayer(true);
+                      toggleDay(dIdx, activeDayIndex);
+                    }}
+                    className={`flex items-center gap-1.5 rounded px-0.5 text-[9.5px] font-semibold transition ${isActive ? 'cursor-default text-stone-900' : lit ? 'text-stone-900 ring-1 ring-stone-400 hover:bg-stone-100' : 'text-stone-500 hover:bg-stone-100'}`}
+                    title={isActive
+                      ? (zh ? '当天始终彩色显示' : 'The active day is always colored')
+                      : (zh ? (lit ? '关闭本天色彩' : '点亮本天色彩') : (lit ? 'Unlight this day' : 'Light this day'))}
+                    aria-pressed={lit}
+                  >
+                    <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: lit ? plannerDayColor(dIdx) : '#d6d3d1' }} />
+                    <span>
+                      D{dIdx + 1} · {date.slice(5).replace('-', '/')}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ) : null}
+
+        {/* Anchored Mini Popover on Clicked Marker with 3 Emoji Actions */}
+        {selectedPlace && selectedPointScreen && selectedPointScreen.x >= -60 && selectedPointScreen.x <= containerSize.width + 60 && selectedPointScreen.y >= -60 && selectedPointScreen.y <= containerSize.height + 60 && (
+          <div
+            className="absolute z-50 rounded-xl border border-stone-200/95 bg-white/95 p-2.5 shadow-xl backdrop-blur-md transition-all duration-150 ownly-pop-in select-text"
+            style={{
+              left: `${Math.max(compact ? 80 : 130, Math.min(containerSize.width - (compact ? 80 : 130), selectedPointScreen.x))}px`,
+              top: selectedPointScreen.y > 170 ? `${selectedPointScreen.y - 12}px` : `${selectedPointScreen.y + 26}px`,
+              transform: selectedPointScreen.y > 170 ? 'translate(-50%, -100%)' : 'translate(-50%, 0)',
+              width: 'max-content',
+              maxWidth: `${Math.min(compact ? 220 : 300, containerSize.width - 24)}px`,
+              minWidth: compact ? '150px' : '220px',
+            }}
+            onClick={(e) => e.stopPropagation()}
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            <MapPlaceCard
+              place={selectedPlace}
+              zh={zh}
+              activeDayIndex={activeDayIndex}
+              visitCount={visitCountByPlaceId?.get(canonicalPlaceId(selectedPlace)) ?? 0}
+              scheduledPlace={selectedScheduledPlace}
+              dayStopCount={activeDayStopCount}
+              onSchedule={onSchedulePlace}
+              onUnschedule={onUnschedulePlace}
+              onShelve={onShelvePlace}
+              onClose={() => setSelectedPlaceId(null)}
+            />
+          </div>
+        )}
+      </div>
+
+      {/* Footer Helper: tile-source attribution follows the active basemap. */}
+      <div className="border-t border-stone-100 bg-stone-50 px-3 py-1.5 text-[10.5px] text-stone-500">
+        <div className="text-[9px] text-stone-500">
+          © {activeBasemap.attribution.map((attr, index) => (
+            <span key={attr.text}>
+              {index > 0 ? ' · ' : null}
+              <a href={attr.href} target="_blank" rel="noreferrer" className="hover:underline">{attr.text}</a>
+            </span>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
